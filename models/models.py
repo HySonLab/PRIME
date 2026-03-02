@@ -15,9 +15,9 @@ class PRIME(nn.Module):
 
     def __init__(
         self,
-        input_dims,
-        hidden_dim,
         num_classes,
+        input_dims,
+        hidden_dim = 512,
         encoder_layers=3,
         head_hidden_dim=512,
         head_layers=3,
