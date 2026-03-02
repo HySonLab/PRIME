@@ -1,0 +1,53 @@
+data_root: /home/dvnguye2/PRL/data/downstream_task_data
+
+tasks:
+
+  FoldClassification:
+    task_type: classification
+    num_classes: 1195
+
+    splits:
+      train: training.txt
+      val: validation.txt
+      test:
+        family: test_family.txt
+        superfamily: test_superfamily.txt
+        fold: test_fold.txt
+
+    processed_dir: processed
+
+  ECReaction:
+    task_type: classification
+    num_classes: 384
+
+    splits:
+      train: training.txt
+      val: validation.txt
+      test: testing.txt
+
+    processed_dir: processed
+
+  GeneOntology:
+    task_type: multilabel_classification
+    num_classes:
+      MF: 489
+      BP: 1943
+      CC: 320
+
+    splits:
+      train: nrPDB-GO_train.txt
+      val: nrPDB-GO_valid.txt
+      test: nrPDB-GO_test.txt
+
+    processed_dir: processed
+
+  AntibodyDevelopability:
+    task_type: classification
+    num_classes: 2
+
+    splits:
+      train: train.txt
+      val: valid.txt
+      test: test.txt
+      
+    processed_dir: processed

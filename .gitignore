@@ -1,0 +1,19 @@
+# Ignore data directory
+data/
+
+# Ignore checkpoints
+ckpts/
+
+# Ignore logs
+logs/
+
+# Ignore python cache
+__pycache__/
+*.pyc
+
+# Ignore virtual environment
+.vscode/
+
+# Ignore Jupyter Notebook
+tmp/
+

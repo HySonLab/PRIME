@@ -1,0 +1,68 @@
+# =========================================
+# Data
+# =========================================
+data:
+  pdb_dir: /home/dvnguye2/PRL/data/pretrain_data/pdb_data
+  surface_dir: /home/dvnguye2/PRL/data/pretrain_data/surface_data
+  batch_size: 32
+
+# =========================================
+# Atom Encoder
+# =========================================
+atom:
+  k: 16
+  atom_feat_dim: 6
+  hidden_dim: 128
+  latent_dim: 128
+  n_layers: 4
+  lr: 0.001
+  epochs: 50
+  save_path: /home/dvnguye2/PRL/ckpts/atom_egnn_encoder.pt
+
+# =========================================
+# Surface Encoder
+# =========================================
+surface:
+  input_dim: 16
+  hidden_dim: 128
+  latent_dim: 128
+  n_layers: 4
+  lr: 0.001
+  epochs: 50
+  max_faces: 500
+  save_path: /home/dvnguye2/PRL/ckpts/surface_emnn_encoder.pt
+
+# =========================================
+# Hierarchical GNN
+# =========================================
+
+hierarchical:
+  hidden_dim: 128
+  n_layers: 3
+  dropout: 0.1
+  input_dims:
+    surface: 128
+    atom: 128
+    residue: 960
+    sse: 960
+    protein: 960
+  
+# =========================================
+# Output Heads
+# =========================================
+
+head:
+  FoldClassification:
+    hidden_dim: 512
+    num_layers: 3
+    dropout: 0.3
+
+  ECReaction:
+    hidden_dim: 512
+    num_layers: 3
+    dropout: 0.3
+
+  GeneOntology:
+    hidden_dim: 512
+    num_layers: 3
+    dropout: 0.3
