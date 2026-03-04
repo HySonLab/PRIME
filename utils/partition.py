@@ -13,7 +13,7 @@ import trimesh
 from Bio.PDB import Selection
 import open3d as o3d
 
-MAX_FACES = 500
+MAX_FACES = 1024
 
 def mesh_simplification_quadric_decimation(mesh, target_faces):
     """
@@ -317,15 +317,7 @@ def extract_partition_matrices(
     """
 
     partitions = {}
-
-    # ---------- Surface to Atom ----------
-    if surface_path is None:
-        if pdb_path is None:
-            raise ValueError(
-                "Either `surface_path` or `pdb_path` must be provided."
-            )
-        surface_path = pdb_path.replace(".pdb", "_surface.obj")
-
+    
     if pdb_path is not None:
         # --- Parse PDB---
         parser_pdb = PDBParser(QUIET=True)

@@ -15,6 +15,7 @@ tasks:
         fold: test_fold.txt
 
     processed_dir: processed
+    graph_dir: graphs
 
   ECReaction:
     task_type: classification
@@ -26,6 +27,7 @@ tasks:
       test: testing.txt
 
     processed_dir: processed
+    graph_dir: graphs
 
   GeneOntology:
     task_type: multilabel_classification
@@ -40,6 +42,7 @@ tasks:
       test: nrPDB-GO_test.txt
 
     processed_dir: processed
+    graph_dir: graphs
 
   AntibodyDevelopability:
     task_type: classification
@@ -51,3 +54,4 @@ tasks:
       test: test.txt
       
     processed_dir: processed
+    graph_dir: graphs

@@ -6,6 +6,9 @@ import sys
 import argparse
 import yaml
 
+import scipy.sparse as sp
+import numpy as np
+
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 from utils.hierarchical_graph import HierarchicalProteinGraph, build_hierarchical_protein_graph
@@ -19,12 +22,12 @@ class GraphBlock(nn.Module):
         self.activation = nn.GELU()
 
     def forward(self, X, A):
-
         # Pre-norm
         H = self.norm(X)
 
         # Aggregate neighbors
-        AX = torch.sparse.mm(A, H)
+        # AX = torch.sparse.mm(A, H)
+        AX = torch.sparse.mm(A.cpu(), H.cpu()).to(H.device)
 
         # Transform
         H = self.linear(AX)
@@ -61,7 +64,7 @@ class HierarchicalLayer(nn.Module):
         self.residue_to_sse = nn.Linear(dims["residue"], dims["sse"])
         self.sse_to_protein = nn.Linear(dims["sse"], dims["protein"])
 
-        # Gated fusion blocks (used for BOTH directions)
+        # Gated fusion
         self.atom_fuse = GatedFusion(dims["atom"])
         self.residue_fuse = GatedFusion(dims["residue"])
         self.sse_fuse = GatedFusion(dims["sse"])
@@ -70,7 +73,6 @@ class HierarchicalLayer(nn.Module):
 
     def forward(self, graph, H):
 
-        # Unpack current embeddings
         H_surface = H["surface"]
         H_atom = H["atom"]
         H_residue = H["residue"]
@@ -78,34 +80,34 @@ class HierarchicalLayer(nn.Module):
         H_protein = H["protein"]
 
         # ==================================================
-        # Bottom-Up (Fine → Coarse)
+        # Bottom-Up
         # ==================================================
 
-        atom_up = torch.sparse.mm(
-            graph.partitions["surface_to_atom"].T,
-            H_surface
-        )
+        Pi_sa_T = graph.partitions["surface_to_atom_T"]
+        # atom_up = torch.sparse.mm(Pi_sa_T, H_surface)
+        atom_up = torch.sparse.mm(Pi_sa_T.cpu(), H_surface.cpu()).to(H_surface.device)
+        
         atom_up = self.surface_to_atom(atom_up)
         H_atom = self.atom_fuse(H_atom, atom_up)
 
-        residue_up = torch.sparse.mm(
-            graph.partitions["atom_to_residue"].T,
-            H_atom
-        )
+        Pi_ar_T = graph.partitions["atom_to_residue_T"]
+        # residue_up = torch.sparse.mm(Pi_ar_T, H_atom)
+        residue_up = torch.sparse.mm(Pi_ar_T.cpu(), H_atom.cpu()).to(H_atom.device)
+        
         residue_up = self.atom_to_residue(residue_up)
         H_residue = self.residue_fuse(H_residue, residue_up)
 
-        sse_up = torch.sparse.mm(
-            graph.partitions["residue_to_sse"].T,
-            H_residue
-        )
+        Pi_rs_T = graph.partitions["residue_to_sse_T"]
+        # sse_up = torch.sparse.mm(Pi_rs_T, H_residue)
+        sse_up = torch.sparse.mm(Pi_rs_T.cpu(), H_residue.cpu()).to(H_residue.device)
+        
         sse_up = self.residue_to_sse(sse_up)
         H_sse = self.sse_fuse(H_sse, sse_up)
 
-        protein_up = torch.sparse.mm(
-            graph.partitions["sse_to_protein"].T,
-            H_sse
-        )
+        Pi_sp_T = graph.partitions["sse_to_protein_T"]
+        # protein_up = torch.sparse.mm(Pi_sp_T, H_sse)
+        protein_up = torch.sparse.mm(Pi_sp_T.cpu(), H_sse.cpu()).to(H_sse.device)
+        
         protein_up = self.sse_to_protein(protein_up)
         H_protein = self.protein_fuse(H_protein, protein_up)
 
@@ -120,31 +122,26 @@ class HierarchicalLayer(nn.Module):
         H_protein = self.protein_gnn(H_protein, graph.protein.A)
 
         # ==================================================
-        # Top-Down (Coarse → Fine)
+        # Top-Down
         # ==================================================
 
-        sse_down = torch.sparse.mm(
-            graph.partitions["sse_to_protein"],
-            H_protein
-        )
+        Pi_sp = graph.partitions["sse_to_protein"]
+        # sse_down = torch.sparse.mm(Pi_sp, H_protein)
+        sse_down = torch.sparse.mm(Pi_sp.cpu(), H_protein.cpu()).to(H_protein.device)
         H_sse = self.sse_fuse(H_sse, sse_down)
 
-        residue_down = torch.sparse.mm(
-            graph.partitions["residue_to_sse"],
-            H_sse
-        )
+        Pi_rs = graph.partitions["residue_to_sse"]
+        # residue_down = torch.sparse.mm(Pi_rs, H_sse)
+        residue_down = torch.sparse.mm(Pi_rs.cpu(), H_sse.cpu()).to(H_sse.device)
         H_residue = self.residue_fuse(H_residue, residue_down)
 
-        atom_down = torch.sparse.mm(
-            graph.partitions["atom_to_residue"],
-            H_residue
-        )
+        Pi_ar = graph.partitions["atom_to_residue"]
+        atom_down = torch.sparse.mm(Pi_ar, H_residue)
         H_atom = self.atom_fuse(H_atom, atom_down)
 
-        surface_down = torch.sparse.mm(
-            graph.partitions["surface_to_atom"],
-            H_atom
-        )
+        Pi_sa = graph.partitions["surface_to_atom"]
+        # surface_down = torch.sparse.mm(Pi_sa, H_atom)
+        surface_down = torch.sparse.mm(Pi_sa.cpu(), H_atom.cpu()).to(H_atom.device)
         H_surface = self.surface_fuse(H_surface, surface_down)
 
         return {

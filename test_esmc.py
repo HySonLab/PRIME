@@ -6,7 +6,10 @@ from tqdm import tqdm
 from torchmetrics.classification import MulticlassAccuracy, MultilabelF1Score
 
 from models.models import ESMC_Baseline
-from utils.dataset import build_dataloaders
+from esm.sdk.api import ESMProtein, LogitsConfig
+from esm.models.esmc import ESMC
+
+from utils.dataset import build_sequence_dataloaders
 
 # --------------------------------------------------
 # Load YAML config
@@ -101,18 +104,25 @@ def test_model(model, loader, task_type, num_classes, device):
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="data/data_config.yml")
+    parser.add_argument("--data_config", type=str, default="config/data_config.yaml")
+    parser.add_argument("--model_config", type=str, default="config/model_config.yaml")
     parser.add_argument("--task", type=str, default="FoldClassification")
     parser.add_argument("--go_branch", type=str, default=None)
-    parser.add_argument("--test_set_split", type=str, default=None)  # NEW
+    parser.add_argument("--test_set_split", type=str, default=None)
     parser.add_argument("--batch_size", type=int, default=4)
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    config = load_config(args.config)
+    # --------------------------------------------------
+    # Load YAML config
+    # --------------------------------------------------
+    config = load_config(args.data_config)
     task_cfg = config["tasks"][args.task]
     task_type = task_cfg["task_type"]
+    
+    model_config = load_config(args.model_config)
+    head_cfg = model_config["head"][args.task]
 
     # --------------------------------------------------
     # Determine num_classes + checkpoint
@@ -124,7 +134,7 @@ if __name__ == "__main__":
             raise ValueError("Must specify --go_branch for GeneOntology")
 
         num_classes = task_cfg["num_classes"][args.go_branch]
-        ckpt_path = f"/home/dvnguye2/PRL/ckpts/best_esmc_{args.task}_{args.go_branch}.pt"
+        ckpt_path = f"/home/dvnguye2/PRL/ckpts/best_{args.model_name}_{args.task}_{args.go_branch}.pt"
 
     elif args.task == "FoldClassification":
 
@@ -140,14 +150,15 @@ if __name__ == "__main__":
     
     print("=" * 50)
     print("Num Classes:", num_classes)
+    print("Checkpoint:", ckpt_path)
     print("=" * 50)
 
     # --------------------------------------------------
     # Build Test Loader
     # --------------------------------------------------
 
-    test_loader = build_dataloaders(
-        args.config,
+    test_loader = build_sequence_dataloaders(
+        args.data_config,
         args.task,
         batch_size=args.batch_size,
         test_only=True,
@@ -157,8 +168,17 @@ if __name__ == "__main__":
     # --------------------------------------------------
     # Load Model
     # --------------------------------------------------
-
-    model = ESMC_Baseline(num_classes=num_classes)
+    client = ESMC.from_pretrained("esmc_600m").to(device)
+    
+    model = ESMC_Baseline(
+        esm_client=client,
+        embedding_dim=1152,
+        num_classes=num_classes,
+        head_hidden_dim=head_cfg["hidden_dim"],
+        head_layers=head_cfg["num_layers"],
+        dropout=head_cfg["dropout"]
+    )
+    
     state_dict = torch.load(ckpt_path, map_location=device)
     model.load_state_dict(state_dict)
     model.to(device)

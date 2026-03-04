@@ -1,13 +1,14 @@
 #!/bin/bash
 
 # ==========================================
-# Testing Script
+# Testing Script (PRIME)
 # ==========================================
 
 # -----------------------------
 # Config
 # -----------------------------
-CONFIG="/home/dvnguye2/PRL/config/data_config.yaml"
+DATA_CONFIG="/home/dvnguye2/PRL/config/data_config.yaml"
+MODEL_CONFIG="/home/dvnguye2/PRL/config/model_config.yaml"
 TASK="FoldClassification"   # Option: FoldClassification, ECReaction, GeneOntology
 BATCH_SIZE=32
 
@@ -15,10 +16,11 @@ BATCH_SIZE=32
 GO_BRANCH="CC"   # Option: MF, BP, CC
 
 # Optional for FoldClassification
-TEST_SET_SPLIT="fold"   # Example: family / superfamily / fold
+TEST_SET_SPLIT="family"   # Example: family / superfamily / fold
 
 echo "===================================="
-echo "Testing Task: $TASK"
+echo "Testing PRIME"
+echo "Task: $TASK"
 echo "Batch Size: $BATCH_SIZE"
 echo "===================================="
 
@@ -30,8 +32,9 @@ if [ "$TASK" == "GeneOntology" ]; then
 
     echo "GO Branch: $GO_BRANCH"
 
-    python test.py \
-        --config $CONFIG \
+    python test_prime.py \
+        --data_config $DATA_CONFIG \
+        --model_config $MODEL_CONFIG \
         --task $TASK \
         --go_branch $GO_BRANCH \
         --batch_size $BATCH_SIZE
@@ -40,16 +43,18 @@ elif [ "$TASK" == "FoldClassification" ]; then
 
     echo "Test Split: $TEST_SET_SPLIT"
 
-    python test.py \
-        --config $CONFIG \
+    python test_prime.py \
+        --data_config $DATA_CONFIG \
+        --model_config $MODEL_CONFIG \
         --task $TASK \
         --test_set_split $TEST_SET_SPLIT \
         --batch_size $BATCH_SIZE
 
 else
 
-    python test.py \
-        --config $CONFIG \
+    python test_prime.py \
+        --data_config $DATA_CONFIG \
+        --model_config $MODEL_CONFIG \
         --task $TASK \
         --batch_size $BATCH_SIZE
 

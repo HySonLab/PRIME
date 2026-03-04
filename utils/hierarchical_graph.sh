@@ -1,19 +1,34 @@
 #!/bin/bash
 
-# =====================================
-# Config
-# =====================================
-CONFIG="/home/dvnguye2/PRL/config/model_config.yaml"
-PDB_DIR="/home/dvnguye2/PRL/data/pretrain_data/pdb_data"
-PDB_PATH="/home/dvnguye2/PRL/data/pretrain_data/pdb_data/AF-A0A009IHW8-F1-model_v6.pdb"
-DEVICE=0
+# ==========================================
+# Hierarchical Graph Builder (Multi-Task)
+# ==========================================
 
-# =====================================
-# Run
-# =====================================
-CUDA_VISIBLE_DEVICES=$DEVICE python hierarchical_graph.py \
-    --config $CONFIG \
-    --pdb_path $PDB_PATH \
-    --use_pretrained_atom \
-    --use_pretrained_surface \
-    # --pdb_dir $PDB_DIR
+# ---- CHANGE ONLY THIS ----
+TASK="FoldClassification"
+# TASK="ECReaction"
+# TASK="GeneOntology"
+# TASK="AntibodyDevelopability"
+
+# ---- Base directories ----
+BASE_DIR="/home/dvnguye2/PRL/data/downstream_task_data"
+
+# ---- Auto paths ----
+PT_DIR="${BASE_DIR}/${TASK}/processed"
+OUTPUT_DIR="${BASE_DIR}/${TASK}/graphs"
+
+# ---- Create output directory automatically ----
+mkdir -p "$OUTPUT_DIR"
+
+echo "===================================="
+echo "Task: $TASK"
+echo "Input PT directory: $PT_DIR"
+echo "Output directory: $OUTPUT_DIR"
+echo "===================================="
+
+# ---- Run Python ----
+python ./utils/hierarchical_graph.py \
+    --pt_dir "$PT_DIR" \
+    --output_dir "$OUTPUT_DIR"
+
+echo "Finished building graphs for $TASK"

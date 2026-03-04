@@ -5,7 +5,7 @@ class MLP_Head(nn.Module):
     def __init__(self, in_dim, out_dim,
                     hidden_dim=512,
                     num_layers=3,
-                    dropout=0.3):
+                    dropout=0.1):
             super().__init__()
 
             layers = []

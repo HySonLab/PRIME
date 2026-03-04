@@ -21,7 +21,7 @@ class PRIME(nn.Module):
         encoder_layers=3,
         head_hidden_dim=512,
         head_layers=3,
-        dropout=0.3
+        dropout=0.1
     ):
         super().__init__()
 
@@ -49,7 +49,6 @@ class PRIME(nn.Module):
         protein_embedding = self.encoder(graph)["protein"]
         logits = self.head(protein_embedding)
         return logits
-
 
 class ESMC_Baseline(nn.Module):
 
@@ -99,7 +98,7 @@ class ESMC_Baseline(nn.Module):
             )
 
             embeddings = logits_output.embeddings.squeeze()
-            embedding = embeddings[1:-1].mean(dim=0)
+            embedding = embeddings[1:-1].mean(dim=0) # Average pooling over sequence dimension, excluding CLS and EOS tokens
             embeddings_list.append(embedding)
 
         protein_embedding = torch.stack(embeddings_list, dim=0)

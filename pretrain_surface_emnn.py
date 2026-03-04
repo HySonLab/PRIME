@@ -6,7 +6,7 @@ import numpy as np
 import trimesh
 from scipy.spatial import cKDTree
 from models.emnn_autoencoder import EMNN_AutoEncoder
-from partition import extract_partition_matrices, mesh_simplification_quadric_decimation
+from utils.partition import extract_partition_matrices, mesh_simplification_quadric_decimation
 from utils.hierarchical_graph import build_surface_graph
 from glob import glob
 from torch.utils.data import Dataset

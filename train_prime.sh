@@ -15,10 +15,10 @@ EPOCHS=150
 LR=1e-3
 
 # GPU Selection
-DEVICE_ID=1   # Change this to the GPU you want (0,1,2,...)
+DEVICE_ID=0   # Change this to the GPU you want (0,1,2,...)
 
 # Optional (only used for GeneOntology)
-GO_BRANCH="CC"   # Options: MF, BP, CC
+GO_BRANCH="MF"   # Options: MF, BP, CC
 
 echo "===================================="
 echo "Training Task: $TASK"
@@ -41,7 +41,7 @@ if [ "$TASK" == "GeneOntology" ]; then
 
     echo "GO Branch: $GO_BRANCH"
 
-    python train.py \
+    python train_prime.py \
         --data_config $DATA_CONFIG \
         --model_config $MODEL_CONFIG \
         --task $TASK \
@@ -52,7 +52,7 @@ if [ "$TASK" == "GeneOntology" ]; then
 
 else
 
-    python train.py \
+    python train_prime.py \
         --data_config $DATA_CONFIG \
         --model_config $MODEL_CONFIG \
         --task $TASK \

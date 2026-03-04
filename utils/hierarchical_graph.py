@@ -5,8 +5,10 @@ from scipy.spatial import cKDTree
 import argparse
 import trimesh
 from esm.sdk.api import ESMProtein, LogitsConfig
+
 from esm.models.esmc import ESMC
-client = ESMC.from_pretrained("esmc_300m").to("cuda")
+client = ESMC.from_pretrained("esmc_600m").to("cuda")
+
 from Bio.PDB import PDBParser
 from Bio.SeqUtils import seq1
 import open3d as o3d
@@ -21,6 +23,93 @@ from utils.partition import extract_partition_matrices, mesh_simplification_quad
 from models.egnn import EGNN
 from models.emnn import EMNN
 from torch_cluster import knn_graph
+from pymol import cmd
+
+MAX_FACES = 1024
+
+ATOM37_NAMES = [
+    "N", "CA", "C", "O", "CB",
+    "CG", "CG1", "CG2", "CD", "CD1", "CD2",
+    "CE", "CE1", "CE2", "CE3",
+    "CZ", "CZ2", "CZ3",
+    "CH2",
+    "ND1", "ND2", "NE", "NE1", "NE2",
+    "NH1", "NH2",
+    "NZ",
+    "OD1", "OD2",
+    "OE1", "OE2",
+    "OG", "OG1",
+    "OH",
+    "SD",
+    "SG",
+    "OXT"
+]
+
+def write_atom_to_pdb(data, output_path):
+
+    coords = data.coords.numpy()
+    print(f"Coords shape: {coords.shape}")
+    residue_names = data.residues
+    chains = data.chains.numpy()
+    residue_ids = data.residue_id
+
+    atom_counter = 1
+    lines = []
+
+    for res_idx in range(coords.shape[0]):
+
+        residue_name = residue_names[res_idx]
+        chain_id = residue_ids[res_idx].split(":")[0]
+        res_number = int(residue_ids[res_idx].split(":")[2])
+
+        for atom_idx in range(coords.shape[1]):
+
+            x, y, z = coords[res_idx, atom_idx]
+
+            # Skip padding atoms
+            # if np.linalg.norm([x, y, z]) < 1e-4:
+            #     continue
+
+            atom_name = ATOM37_NAMES[atom_idx]
+            element = atom_name[0]  # crude but works
+
+            line = (
+                f"ATOM  {atom_counter:5d} "
+                f"{atom_name:<4s}"
+                f"{residue_name:>4s} "
+                f"{chain_id}"
+                f"{res_number:4d}    "
+                f"{x:8.3f}{y:8.3f}{z:8.3f}"
+                f"  1.00 20.00           {element:>2s}"
+            )
+
+            lines.append(line)
+            atom_counter += 1
+
+    lines.append("END")
+
+    with open(output_path, "w") as f:
+        f.write("\n".join(lines))
+
+    print(f"PDB written to {output_path}")
+
+def export_surface(
+    pdb_path,
+    output_path,
+    surface_quality=0,
+    solvent_radius=1.4,
+    selection="all",
+):
+    cmd.load(pdb_path, "prot")
+
+    cmd.hide("everything", selection)
+    cmd.show("surface", selection)
+
+    cmd.set("surface_quality", surface_quality)
+    cmd.set("solvent_radius", solvent_radius)
+
+    cmd.save(output_path, selection)
+    cmd.delete("all")
 
 def build_surface_graph(mesh, device):
     """
@@ -366,17 +455,37 @@ def get_protein_features(residue_features):
 
 @dataclass
 class ProteinGraphLevel:
-    """
-    A single level in the protein hierarchy.
-    """
     name: str
-    A: csr_matrix              # (N, N) adjacency
-    X: np.ndarray              # (N, d) node features
+    A: csr_matrix              # scipy sparse
+    X: np.ndarray              # numpy features
+
+    def to_torch(self, device):
+        """
+        Convert adjacency and features to torch tensors.
+        """
+
+        # Convert adjacency once
+        A = self.A.tocoo()
+        indices = torch.stack([
+            torch.from_numpy(A.row),
+            torch.from_numpy(A.col)
+        ]).long()
+
+        values = torch.from_numpy(A.data).float()
+
+        self.A = torch.sparse_coo_tensor(
+            indices,
+            values,
+            size=A.shape,
+            device=device
+        ).coalesce()
+        
+        self.X = self.X.to(device)
 
     @property
-    def num_nodes(self) -> int:
+    def num_nodes(self):
         return self.A.shape[0]
-    
+
 class HierarchicalProteinGraph:
     """
     Protein-specific hierarchical graph with physics-informed coarsening.
@@ -400,6 +509,43 @@ class HierarchicalProteinGraph:
         self.partitions = partitions
 
         self._validate()
+    
+    def to_torch(self, device):
+        """
+        Convert entire hierarchical graph to torch tensors.
+        """
+
+        # Convert all graph levels
+        self.surface.to_torch(device)
+        self.atom.to_torch(device)
+        self.residue.to_torch(device)
+        self.sse.to_torch(device)
+        self.protein.to_torch(device)
+
+        # Convert partitions and cache transpose
+        new_partitions = {}
+
+        for key, Pi in self.partitions.items():
+            Pi = Pi.tocoo()
+
+            indices = torch.stack([
+                torch.from_numpy(Pi.row),
+                torch.from_numpy(Pi.col)
+            ]).long()
+
+            values = torch.from_numpy(Pi.data).float()
+
+            Pi_torch = torch.sparse_coo_tensor(
+                indices,
+                values,
+                size=Pi.shape,
+                device=device
+            ).coalesce()
+
+            new_partitions[key] = Pi_torch
+            new_partitions[key + "_T"] = Pi_torch.transpose(0, 1).coalesce()
+
+        self.partitions = new_partitions
 
     def _validate(self):
         required = {
@@ -429,6 +575,7 @@ class HierarchicalProteinGraph:
 
 def build_hierarchical_protein_graph(
         pdb_path: str,
+        surface_path: str,
         surface_radius: float = 1.0,
         use_pretrained_atom: bool = False,
         use_pretrained_surface: bool = False,
@@ -449,12 +596,8 @@ def build_hierarchical_protein_graph(
 
     structure, partitions = extract_partition_matrices(
         pdb_path=pdb_path,
+        surface_path=surface_path,
     )
-
-    # --------------------------------------------------
-    # Load surface mesh
-    # --------------------------------------------------
-    surface_path = pdb_path.replace(".pdb", "_surface.obj")
 
     mesh = trimesh.load(surface_path, process=False)
 
@@ -482,6 +625,8 @@ def build_hierarchical_protein_graph(
         encoder=surface_encoder,
         device=device,
     )
+    
+    X_surface = torch.tensor(X_surface, dtype=torch.float32)
 
     surface_level = ProteinGraphLevel(
         name="surface",
@@ -504,6 +649,8 @@ def build_hierarchical_protein_graph(
         encoder=atom_encoder,
         device=device,
     )
+    
+    X_atom = torch.tensor(X_atom, dtype=torch.float32)
 
     atom_level = ProteinGraphLevel(
         name="atom",
@@ -519,11 +666,14 @@ def build_hierarchical_protein_graph(
 
     A_res.data[:] = 1.0
     A_res.eliminate_zeros()
+    
+    X_res = get_residue_features(protein_seq)
+    X_res = torch.tensor(X_res, dtype=torch.float32)
 
     residue_level = ProteinGraphLevel(
         name="residue",
         A=A_res,
-        X=get_residue_features(protein_seq),
+        X=X_res,
     )
 
     # ==================================================
@@ -534,11 +684,14 @@ def build_hierarchical_protein_graph(
 
     A_sse.data[:] = 1.0
     A_sse.eliminate_zeros()
+    
+    X_sse = get_sse_features(Pi_rs, residue_level.X.numpy())
+    X_sse = torch.tensor(X_sse, dtype=torch.float32)
 
     sse_level = ProteinGraphLevel(
         name="sse",
         A=A_sse,
-        X=get_sse_features(Pi_rs, residue_level.X),
+        X=X_sse,
     )
 
     # ==================================================
@@ -549,11 +702,14 @@ def build_hierarchical_protein_graph(
 
     A_protein.data[:] = 1.0
     A_protein.eliminate_zeros()
+     
+    X_protein = get_protein_features(residue_level.X.numpy())
+    X_protein = torch.tensor(X_protein, dtype=torch.float32)
 
     protein_level = ProteinGraphLevel(
         name="protein",
         A=A_protein,
-        X=get_protein_features(residue_level.X),
+        X=X_protein,
     )
 
     # ==================================================
@@ -571,163 +727,61 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Hierarchical protein graph construction"
     )
-
-    # --------------------------------------------------
-    # Input (single or directory)
-    # --------------------------------------------------
+    
     group = parser.add_mutually_exclusive_group(required=True)
 
     group.add_argument(
-        "--pdb_path",
+        "--pt_dir",
         type=str,
-        help="Path to single PDB file"
-    )
-
-    group.add_argument(
-        "--pdb_dir",
-        type=str,
-        help="Directory containing multiple PDB files"
-    )
-
-    # --------------------------------------------------
-    # Surface options
-    # --------------------------------------------------
-    parser.add_argument(
-        "--surface_radius",
-        type=float,
-        default=1.0,
-        help="Surface radius parameter (Å)"
-    )
-
-    # --------------------------------------------------
-    # Pretrained encoders
-    # --------------------------------------------------
-    parser.add_argument(
-        "--use_pretrained_atom",
-        action="store_true",
-        help="Use pretrained atomic encoder"
+        help="Directory containing .pt files to reconstruct PDB and build graph"
     )
 
     parser.add_argument(
-        "--use_pretrained_surface",
-        action="store_true",
-        help="Use pretrained surface encoder"
-    )
-
-    parser.add_argument(
-        "--config",
+        "--output_dir",
         type=str,
         required=True,
-        help="Path to unified YAML config file"
+        help="Directory to save generated graph .pt files"
     )
-
+    
     args = parser.parse_args()
-
-    with open(args.config, "r") as f:
-        config = yaml.safe_load(f)
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    # --------------------------------------------------
-    # Load encoders
-    # --------------------------------------------------
-    atom_encoder = None
-    surface_encoder = None
-
-    # --------------------------------------------
-    # Load Atom Encoder
-    # --------------------------------------------
-    if args.use_pretrained_atom:
-
-        atom_cfg = config["atom"]
-
-        atom_encoder = EGNN(
-            in_node_nf=atom_cfg["atom_feat_dim"],
-            hidden_nf=atom_cfg["hidden_dim"],
-            out_node_nf=atom_cfg["latent_dim"],
-            in_edge_nf=1,
-            n_layers=atom_cfg["n_layers"],
-            device=device
-        )
-
-        ckpt = torch.load(atom_cfg["save_path"], map_location=device)
-
-        # If you saved config + state_dict
-        if "model_state_dict" in ckpt:
-            atom_encoder.load_state_dict(ckpt["model_state_dict"])
-        else:
-            atom_encoder.load_state_dict(ckpt)
-
-        atom_encoder.eval()
-
-    # --------------------------------------------
-    # Load Surface Encoder
-    # --------------------------------------------
-    if args.use_pretrained_surface:
-
-        surface_cfg = config["surface"]
-
-        surface_encoder = EMNN(
-            in_node_nf=surface_cfg["input_dim"],
-            hidden_nf=surface_cfg["hidden_dim"],
-            out_node_nf=surface_cfg["latent_dim"],
-            in_edge_nf=1,
-            n_layers=surface_cfg["n_layers"],
-            device=device
-        )
-
-        ckpt = torch.load(surface_cfg["save_path"], map_location=device)
-
-        if "model_state_dict" in ckpt:
-            surface_encoder.load_state_dict(ckpt["model_state_dict"])
-        else:
-            surface_encoder.load_state_dict(ckpt)
-
-        surface_encoder.eval()
-
-    # --------------------------------------------------
-    # Helper function to process one PDB
-    # --------------------------------------------------
-    def process_pdb(pdb_path):
-
-        graph = build_hierarchical_protein_graph(
-            pdb_path=pdb_path,
-            surface_radius=args.surface_radius,
-            use_pretrained_atom=args.use_pretrained_atom,
-            use_pretrained_surface=args.use_pretrained_surface,
-            atom_encoder=atom_encoder,
-            surface_encoder=surface_encoder,
-            device=device
-        )
-
-        print("\n=== Hierarchical Protein Graph Summary ===")
-        for level_name, level in [
-            ("surface", graph.surface),
-            ("atom", graph.atom),
-            ("residue", graph.residue),
-            ("sse", graph.sse),
-            ("protein", graph.protein),
-        ]:
-            print(
-                f"{level_name:8s} | "
-                f"nodes: {level.num_nodes:5d} | "
-                f"edges: {level.A.nnz // 2:6d} | "
-                f"feat shape: {level.X.shape}"
-            )
-
-        print("\nHierarchy construction SUCCESS")
-
+    
     # --------------------------------------------------
     # Run
     # --------------------------------------------------
-    if args.pdb_path:
 
-        process_pdb(args.pdb_path)
+    pt_files = sorted(glob(os.path.join(args.pt_dir, "*.pt")))
+    print(f"Found {len(pt_files)} PT files")
 
-    else:
-        pdb_files = sorted(glob(os.path.join(args.pdb_dir, "*.pdb")))
+    for pt_path in tqdm(pt_files, desc="Processing PT files"):
 
-        print(f"Found {len(pdb_files)} PDB files")
+        base_name = os.path.splitext(os.path.basename(pt_path))[0]
+        reconstructed_pdb_path = os.path.join("/home/dvnguye2/PRL/tmp/tmp.pdb")
+        
+        process_data = torch.load(pt_path, map_location="cpu")
 
-        for pdb_path in tqdm(pdb_files, desc="Processing PDBs"):
-            process_pdb(pdb_path)
+        # Reconstruct PDB
+        write_atom_to_pdb(process_data, reconstructed_pdb_path)
+        
+        # Create surface mesh
+        surface_obj_path = f"/home/dvnguye2/PRL/tmp/tmp.obj"
+        export_surface(
+            pdb_path=reconstructed_pdb_path,
+            output_path=surface_obj_path,
+            surface_quality=0,
+            solvent_radius=1.4,
+            selection="all"
+        )
+
+        try:
+            # Build Graph
+            graph = build_hierarchical_protein_graph(
+                pdb_path=reconstructed_pdb_path,
+                surface_path=surface_obj_path,
+            )
+
+            # Save Graph
+            graph_output_path = os.path.join(args.output_dir, base_name + ".pt")
+            torch.save(graph, graph_output_path)
+        except Exception as e:
+            print(f"Error processing {pt_path}: {e}")
+            continue

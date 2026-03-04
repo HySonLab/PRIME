@@ -37,15 +37,17 @@ surface:
 # =========================================
 
 hierarchical:
-  hidden_dim: 128
+  hidden_dim: 512
   n_layers: 3
   dropout: 0.1
   input_dims:
-    surface: 128
-    atom: 128
-    residue: 960
-    sse: 960
-    protein: 960
+    # surface: 128
+    # atom: 128
+    surface: 3
+    atom: 7
+    residue: 1152
+    sse: 1152
+    protein: 1152
   
 # =========================================
 # Output Heads
@@ -53,16 +55,16 @@ hierarchical:
 
 head:
   FoldClassification:
-    hidden_dim: 512
+    hidden_dim: 1024
     num_layers: 3
-    dropout: 0.3
+    dropout: 0.5
 
   ECReaction:
-    hidden_dim: 512
+    hidden_dim: 1024
     num_layers: 3
-    dropout: 0.3
+    dropout: 0.5
 
   GeneOntology:
-    hidden_dim: 512
+    hidden_dim: 1024
     num_layers: 3
-    dropout: 0.3
+    dropout: 0.5
