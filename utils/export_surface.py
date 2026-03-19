@@ -50,7 +50,7 @@ def main():
     parser.add_argument(
         "--out",
         required=True,
-        help="Output OBJ path (for single PDB) OR output directory (for pdb_dir mode)",
+        help="Output Ply path (for single PDB) OR output directory (for pdb_dir mode)",
     )
 
     parser.add_argument(
@@ -105,30 +105,33 @@ def main():
 
         os.makedirs(args.out, exist_ok=True)
 
-        pdb_files = sorted(glob(os.path.join(args.pdb_dir, "*.pdb")))[:10]
+        pdb_files = sorted(glob(os.path.join(args.pdb_dir, "*.pdb")))
         print(f"Found {len(pdb_files)} PDB files")
 
         for pdb_path in tqdm(pdb_files, desc="Exporting surfaces"):
             
             pdb_name = os.path.basename(pdb_path).replace(".pdb", "")
-            out_path = os.path.join(args.out, f"{pdb_name}.obj")
+            tmp_path = os.path.join(args.out, f"tmp.obj")
+            out_path = os.path.join(args.out, f"{pdb_name}.ply")
 
             print(f"Exporting {pdb_name}")
 
             export_surface(
                 pdb_path=pdb_path,
-                output_path=out_path,
+                output_path=tmp_path,
                 surface_quality=args.quality,
                 solvent_radius=args.probe,
                 selection=args.selection,
             )
             
-            # mesh = trimesh.load(out_path, process=False)
-            # mesh = mesh_simplification_quadric_decimation(
-            #     mesh,
-            #     target_faces=MAX_FACES
-            # )
-            # mesh.export(out_path)
+            mesh = trimesh.load(tmp_path, process=False)
+            mesh = mesh_simplification_quadric_decimation(
+                mesh,
+                target_faces=MAX_FACES
+            )
+            mesh.vertex_normals = None
+            mesh.face_normals = None
+            mesh.export(out_path)
 
     cmd.quit()
 

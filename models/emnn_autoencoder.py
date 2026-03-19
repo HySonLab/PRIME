@@ -2,24 +2,9 @@ from torch import nn
 import torch
 from .emnn import EMNN 
 
-class EdgeDecoder(nn.Module):
-    def __init__(self, latent_dim):
-        super().__init__()
-        self.mlp = nn.Sequential(
-            nn.Linear(latent_dim * 3, latent_dim),
-            nn.SiLU(),
-            nn.Linear(latent_dim, 1)
-        )
-
-    def forward(self, z_i, z_j):
-        diff = torch.abs(z_i - z_j)
-        x = torch.cat([z_i, z_j, diff], dim=-1)
-        return self.mlp(x).squeeze(-1)
-
-
 class EMNN_AutoEncoder(nn.Module):
     """
-    Edge reconstruction autoencoder using EMNN encoder.
+    Denoising autoencoder using EMNN encoder.
     Suitable for mesh/surface graphs with face_index.
     """
 
@@ -44,45 +29,46 @@ class EMNN_AutoEncoder(nn.Module):
         )
 
         # ----------------------------
-        # Edge Decoder
+        # Coordinate Decoder
         # ----------------------------
-        self.decoder = EdgeDecoder(latent_dim)
+        self.coord_decoder = nn.Sequential(
+            nn.Linear(latent_dim, latent_dim),
+            nn.SiLU(),
+            nn.Linear(latent_dim, 3)
+        )
 
     # =====================================================
     # Forward
     # =====================================================
     def forward(self,
                 h,
-                x,
+                x_noisy,
                 edge_index,
                 face_index,
-                edge_attr,
-                pos_edge_pairs,
-                neg_edge_pairs):
+                edge_attr=None):
+
+        """
+        Input:
+            h         : node features
+            x_noisy   : noisy coordinates
+        Output:
+            x_recon   : reconstructed coordinates
+        """
 
         # ----------------------------
         # Encode with EMNN
         # ----------------------------
         z, _ = self.encoder(
             h,
-            x,
+            x_noisy,
             edge_index,
             face_index,
             edge_attr
         )
 
         # ----------------------------
-        # Positive edges
+        # Decode coordinates
         # ----------------------------
-        zi_pos = z[pos_edge_pairs[0]]
-        zj_pos = z[pos_edge_pairs[1]]
-        pos_logits = self.decoder(zi_pos, zj_pos)
+        x_recon = self.coord_decoder(z)
 
-        # ----------------------------
-        # Negative edges
-        # ----------------------------
-        zi_neg = z[neg_edge_pairs[0]]
-        zj_neg = z[neg_edge_pairs[1]]
-        neg_logits = self.decoder(zi_neg, zj_neg)
-
-        return pos_logits, neg_logits
+        return x_recon

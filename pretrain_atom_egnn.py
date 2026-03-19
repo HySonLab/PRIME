@@ -9,16 +9,23 @@ from models.egnn_autoencoder import EGNN_AutoEncoder
 from glob import glob
 from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
+from sklearn.metrics import roc_auc_score
+from torch.utils.data import random_split
 import yaml
+from tqdm import tqdm
 
+import sys
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+
+from utils.utils import add_noise, normalize_coords
 
 class AtomicDataset(Dataset):
     def __init__(self, pdb_dir, k):
 
         all_files = sorted(glob(os.path.join(pdb_dir, "*.pdb")))
-        self.pdb_files = all_files[:10]
+        self.pdb_files = all_files
         self.k = k
         print(f"Found {len(self.pdb_files)} PDB files")
 
@@ -36,6 +43,17 @@ class AtomicDataset(Dataset):
         )
 
         return h, x, edge_index, edge_attr
+    
+def atom_type_encoding(atom_name):
+    atom_types = ['C', 'N', 'O', 'S', 'P', 'H']
+    
+    encoding = [0] * len(atom_types)
+    
+    first_char = atom_name[0]
+    if first_char in atom_types:
+        encoding[atom_types.index(first_char)] = 1
+    
+    return encoding
 
 def collate_graphs(batch):
 
@@ -66,62 +84,12 @@ def collate_graphs(batch):
 
     return h, x, edge_index, edge_attr
 
-# ------------------------------------------------------------
-# Negative Sampling
-# ------------------------------------------------------------
-def sample_negative_edges(n_nodes, edge_index, num_samples):
-    """
-    Sample negative edges not present in edge_index.
-    """
-    existing = set(zip(edge_index[0].tolist(),
-                       edge_index[1].tolist()))
-
-    neg_i = []
-    neg_j = []
-
-    while len(neg_i) < num_samples:
-        i = np.random.randint(0, n_nodes)
-        j = np.random.randint(0, n_nodes)
-
-        if i != j and (i, j) not in existing:
-            neg_i.append(i)
-            neg_j.append(j)
-
-    return (
-        torch.LongTensor(neg_i),
-        torch.LongTensor(neg_j)
-    )
-
-# ------------------------------------------------------------
-# Loss Function
-# ------------------------------------------------------------
-def edge_reconstruction_loss(pos_logits, neg_logits):
-    pos_labels = torch.ones_like(pos_logits)
-    neg_labels = torch.zeros_like(neg_logits)
-
-    loss_pos = F.binary_cross_entropy_with_logits(
-        pos_logits, pos_labels)
-
-    loss_neg = F.binary_cross_entropy_with_logits(
-        neg_logits, neg_labels)
-
-    return loss_pos + loss_neg
-
-def atom_type_encoding(atom_name):
-    """
-    Very simple atom type encoding.
-    You can extend this later.
-    """
-    atom_types = ['C', 'N', 'O', 'S', 'P', 'H']
-    encoding = [0] * len(atom_types)
-
-    first_char = atom_name[0]
-    if first_char in atom_types:
-        encoding[atom_types.index(first_char)] = 1
-
-    return encoding
-
-def build_atomic_graph_from_pdb(pdb_path, k=16, device="cpu"):
+def build_atomic_graph_from_pdb(
+    pdb_path,
+    k=8,
+    device="cpu",
+    max_atoms=2048
+):
 
     parser = PDBParser(QUIET=True)
     structure = parser.get_structure("protein", pdb_path)
@@ -137,18 +105,30 @@ def build_atomic_graph_from_pdb(pdb_path, k=16, device="cpu"):
         coords.append(atom.coord)
         features.append(atom_type_encoding(atom.get_name()))
 
-    coords = torch.from_numpy(np.array(coords)).float()
-    h = torch.from_numpy(np.array(features)).float()
+    coords = np.array(coords)
+    features = np.array(features)
 
-    coords = coords.to(device)
-    h = h.to(device)
+    # --------------------------------------------------------
+    # Subsample atoms if too large
+    # --------------------------------------------------------
+    if len(coords) > max_atoms:
+        idx = np.random.choice(len(coords), max_atoms, replace=False)
+        coords = coords[idx]
+        features = features[idx]
+
+    # --------------------------------------------------------
+    # Convert to torch
+    # --------------------------------------------------------
+    coords = torch.from_numpy(coords).float()
+    coords = normalize_coords(coords)
+    
+    h = torch.from_numpy(features).float()
 
     # --------------------------------------------------------
     # KNN Graph
     # --------------------------------------------------------
     edge_index = knn_graph(coords, k=k, loop=False)
 
-    # Edge attributes: distances
     row, col = edge_index
     dist = torch.norm(coords[row] - coords[col], dim=1, keepdim=True)
 
@@ -156,9 +136,105 @@ def build_atomic_graph_from_pdb(pdb_path, k=16, device="cpu"):
 
     return h, coords, edge_index, edge_attr
 
-# ------------------------------------------------------------
-# Training
-# ------------------------------------------------------------
+# ============================================================
+# Train
+# ============================================================
+
+def train_epoch(model, loader, optimizer, device):
+
+    model.train()
+    total_loss = 0
+
+    pbar = tqdm(loader, desc="Train", leave=False)
+
+    for h, x, edge_index, edge_attr in pbar:
+
+        h = h.to(device)
+        x = x.to(device)
+        edge_index = edge_index.to(device)
+
+        if edge_attr is not None:
+            edge_attr = edge_attr.to(device)
+
+        # ----------------------------
+        # Add noise
+        # ----------------------------
+        x_noisy, x_target = add_noise(x)
+
+        # ----------------------------
+        # Forward
+        # ----------------------------
+        x_recon = model(
+            h,
+            x_noisy,
+            edge_index,
+            edge_attr
+        )
+
+        # ----------------------------
+        # Loss (reconstruct normalized coords)
+        # ----------------------------
+        loss = F.mse_loss(x_recon, x_target)
+
+        optimizer.zero_grad()
+        loss.backward()
+
+        # Optional: stabilize training
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
+        optimizer.step()
+
+        total_loss += loss.item()
+
+    return total_loss / len(loader)
+
+
+# ============================================================
+# Evaluate
+# ============================================================
+
+def evaluate_epoch(model, loader, device):
+
+    model.eval()
+    total_loss = 0
+
+    with torch.no_grad():
+
+        pbar = tqdm(loader, desc="Val", leave=False)
+
+        for h, x, edge_index, edge_attr in pbar:
+
+            h = h.to(device)
+            x = x.to(device)
+            edge_index = edge_index.to(device)
+
+            if edge_attr is not None:
+                edge_attr = edge_attr.to(device)
+
+            # ----------------------------
+            # Add noise (same as training)
+            # ----------------------------
+            x_noisy, x_target, noise_std = add_noise(x)
+
+            # ----------------------------
+            # Forward
+            # ----------------------------
+            x_recon = model(
+                h,
+                x_noisy,
+                edge_index,
+                edge_attr
+            )
+
+            # ----------------------------
+            # Loss
+            # ----------------------------
+            loss = F.mse_loss(x_recon, x_target)
+
+            total_loss += loss.item()
+
+    return total_loss / len(loader)
+
 def train(config):
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -168,17 +244,36 @@ def train(config):
     data_cfg = config["data"]
 
     # --------------------------------------------------------
-    # Dataset
+    # Dataset + Split
     # --------------------------------------------------------
     dataset = AtomicDataset(
         pdb_dir=data_cfg["pdb_dir"],
         k=atom_cfg["k"]
     )
 
-    loader = DataLoader(
+    dataset_size = len(dataset)
+    train_size = int(0.8 * dataset_size)
+    val_size = dataset_size - train_size
+
+    generator = torch.Generator().manual_seed(42)
+
+    train_dataset, val_dataset = random_split(
         dataset,
+        [train_size, val_size],
+        generator=generator
+    )
+
+    train_loader = DataLoader(
+        train_dataset,
         batch_size=data_cfg["batch_size"],
         shuffle=True,
+        collate_fn=collate_graphs
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=data_cfg["batch_size"],
+        shuffle=False,
         collate_fn=collate_graphs
     )
 
@@ -196,67 +291,57 @@ def train(config):
     optimizer = Adam(model.parameters(), lr=atom_cfg["lr"])
 
     # --------------------------------------------------------
+    # Logging
+    # --------------------------------------------------------
+    log_path = atom_cfg["log_path"]
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+
+    with open(log_path, "w") as f:
+        f.write("========================================\n")
+        f.write("Atom Denoising Autoencoder Training Log\n")
+        f.write("========================================\n")
+
+    # --------------------------------------------------------
     # Training Loop
     # --------------------------------------------------------
+    best_val_loss = float("inf")
+
     for epoch in range(atom_cfg["epochs"]):
 
-        model.train()
-        total_loss = 0
+        train_loss = train_epoch(model, train_loader, optimizer, device)
+        val_loss = evaluate_epoch(model, val_loader, device)
 
-        for h, x, edge_index, edge_attr in loader:
+        log_str = (
+            f"Epoch {epoch:03d}\n"
+            f"Train Loss: {train_loss:.6f}\n"
+            f"Val   Loss: {val_loss:.6f}\n"
+            f"----------------------------------------\n"
+        )
 
-            h = h.to(device)
-            x = x.to(device)
-            edge_index = edge_index.to(device)
-            edge_attr = edge_attr.to(device)
+        print(log_str)
 
-            n_nodes = h.size(0)
-            pos_edges = edge_index
+        with open(log_path, "a") as f:
+            f.write(log_str)
 
-            neg_edges = sample_negative_edges(
-                n_nodes=n_nodes,
-                edge_index=edge_index.cpu(),
-                num_samples=pos_edges.shape[1]
-            )
+        # --------------------------------------------------------
+        # Save best model (based on loss)
+        # --------------------------------------------------------
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
 
-            neg_edges = (
-                neg_edges[0].to(device),
-                neg_edges[1].to(device)
-            )
+            torch.save({
+                "model_state_dict": model.encoder.state_dict(),
+                "config": config
+            }, atom_cfg["save_path"])
 
-            pos_logits, neg_logits = model(
-                h, x,
-                edge_index,
-                edge_attr,
-                pos_edges,
-                neg_edges
-            )
-
-            loss = edge_reconstruction_loss(pos_logits, neg_logits)
-
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-            total_loss += loss.item()
-
-        print(f"Epoch {epoch:03d} | Avg Loss {total_loss/len(loader):.4f}")
-
-    # --------------------------------------------------------
-    # Save checkpoint
-    # --------------------------------------------------------
-    os.makedirs(os.path.dirname(atom_cfg["save_path"]), exist_ok=True)
-
-    torch.save({
-        "model_state_dict": model.encoder.state_dict(),
-        "config": config
-    }, atom_cfg["save_path"])
+            with open(log_path, "a") as f:
+                f.write(f"New best model saved (Val Loss={best_val_loss:.6f})\n")
 
     print(f"Encoder saved to {atom_cfg['save_path']}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, required=True)
+    parser.add_argument("--config", type=str, default="/home/dvnguye2/PRL/config/model_config.yaml")
     args = parser.parse_args()
 
     # --------------------------------------------

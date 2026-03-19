@@ -1,43 +1,31 @@
 import torch
 import torch.nn as nn
 from models.models import ESMC_Baseline
-import yaml
-from torch.utils.data import DataLoader
-from utils.dataset import build_sequence_dataloaders
 import argparse
 from tqdm import tqdm
-from esm.sdk.api import ESMProtein, LogitsConfig
 from esm.models.esmc import ESMC
+from utils.utils import *
 
-def filter_go_labels(y, num_classes):
-
-    offsets = {
-        489: (0, 489),
-        1943: (489, 489 + 1943),
-        320: (489 + 1943, 489 + 1943 + 320)
-    }
-
-    if num_classes not in offsets:
-        raise ValueError("Unknown GO num_classes")
-
-    start, end = offsets[num_classes]
-
-    return [
-        cls - start
-        for cls in y
-        if start <= cls < end
-    ]
-
-def train_one_epoch(model, loader, optimizer, criterion, device, task_type, num_classes):
+def train_one_epoch(
+    model,
+    loader,
+    optimizer,
+    criterion,
+    device,
+    task_type,
+    num_classes
+):
     model.train()
 
-    total_loss = 0
-    
+    total_loss = 0.0
+    metric = get_metric(task_type, num_classes, device)
+
     pbar = tqdm(loader, desc="Training", leave=False)
 
     for batch in pbar:
+
         sequences = [sample["sequence"] for sample in batch]
-        
+
         if task_type == "multilabel_classification":
             labels = torch.zeros(len(batch), num_classes, device=device)
             for i, sample in enumerate(batch):
@@ -46,44 +34,75 @@ def train_one_epoch(model, loader, optimizer, criterion, device, task_type, num_
                 for cls in y:
                     labels[i, cls] = 1.0
         else:
-            labels = torch.tensor([sample["label"] for sample in batch]).to(device)
-        
+            labels = torch.tensor(
+                [sample["label"] for sample in batch],
+                dtype=torch.long,
+                device=device
+            )
+
         optimizer.zero_grad()
+
         logits = model(sequences)
+
         loss = criterion(logits, labels)
         loss.backward()
-        
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
+
         total_loss += loss.item()
 
-    return total_loss / len(loader)
+        # ---- Update metric ----
+        if task_type == "multilabel_classification":
+            metric.update(torch.sigmoid(logits), labels)
+        else:
+            metric.update(logits, labels)
+
+    return total_loss / len(loader), metric.compute().item()
 
 @torch.no_grad()
-def evaluate(model, loader, criterion, device, task_type, num_classes):
+def evaluate(
+    model,
+    loader,
+    criterion,
+    device,
+    task_type,
+    num_classes
+):
     model.eval()
 
-    total_loss = 0
-    
+    total_loss = 0.0
+    metric = get_metric(task_type, num_classes, device)
+
     pbar = tqdm(loader, desc="Evaluating", leave=False)
 
     for batch in pbar:
+
         sequences = [sample["sequence"] for sample in batch]
+
         if task_type == "multilabel_classification":
             labels = torch.zeros(len(batch), num_classes, device=device)
             for i, sample in enumerate(batch):
                 y = sample["label"]
-                y = filter_go_labels(y, num_classes)     
+                y = filter_go_labels(y, num_classes)
                 for cls in y:
                     labels[i, cls] = 1.0
         else:
-            labels = torch.tensor([sample["label"] for sample in batch]).to(device)
-        
+            labels = torch.tensor(
+                [sample["label"] for sample in batch],
+                dtype=torch.long,
+                device=device
+            )
+
         logits = model(sequences)
         loss = criterion(logits, labels)
+
         total_loss += loss.item()
 
-    return total_loss / len(loader)
+        if task_type == "multilabel_classification":
+            metric.update(torch.sigmoid(logits), labels)
+        else:
+            metric.update(logits, labels)
+
+    return total_loss / len(loader), metric.compute().item()
 
 def train_esmc(
     model,
@@ -98,6 +117,7 @@ def train_esmc(
     epochs=150,
     lr=1e-4,
     patience_es=10,
+    factor=0.6,
     patience_lr=5,
 ):
     
@@ -113,11 +133,11 @@ def train_esmc(
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         mode="min",
-        factor=0.6,
+        factor=factor,
         patience=patience_lr
     )
 
-    best_val_loss = float("inf")
+    best_val_metric = 0
     early_stop_counter = 0
 
     # ---- Open log file ----
@@ -131,7 +151,7 @@ def train_esmc(
 
         for epoch in range(epochs):
 
-            train_loss = train_one_epoch(
+            train_loss, train_metric = train_one_epoch(
                 model,
                 train_loader,
                 optimizer,
@@ -141,7 +161,7 @@ def train_esmc(
                 num_classes
             )
 
-            val_loss = evaluate(
+            val_loss, val_metric = evaluate(
                 model,
                 val_loader,
                 criterion,
@@ -155,18 +175,19 @@ def train_esmc(
             # ---- Write to file ----
             log_file.write(f"Epoch {epoch+1:03d}\n")
             log_file.write(f"Train Loss: {train_loss:.6f}\n")
+            log_file.write(f"Train Metric: {train_metric:.6f}\n")
             log_file.write(f"Val   Loss: {val_loss:.6f}\n")
+            log_file.write(f"Val   Metric: {val_metric:.6f}\n")
             log_file.write("-" * 40 + "\n")
             log_file.flush()
 
             print(f"Epoch {epoch+1:03d}")
-            print(f"Train Loss: {train_loss:.4f}")
-            print(f"Val   Loss: {val_loss:.4f}")
+            print(f"Train Loss: {train_loss:.4f} | Train Metric: {train_metric:.4f}")
+            print(f"Val   Loss: {val_loss:.4f} | Val   Metric: {val_metric:.4f}")
             print("-" * 40)
-            log_file.flush()
 
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
+            if val_metric > best_val_metric:
+                best_val_metric = val_metric
                 early_stop_counter = 0
                 torch.save(model.state_dict(), output_path)
                 log_file.write("New best model saved.\n")
@@ -178,24 +199,21 @@ def train_esmc(
                 log_file.write("Early stopping triggered.\n")
                 break
 
-        log_file.write(f"Best Val Loss: {best_val_loss:.6f}\n")
+        log_file.write(f"Best Val Metric: {best_val_metric:.6f}\n")
         log_file.write("Training Finished\n")
 
-def load_config(config_path):
-    with open(config_path, "r") as f:
-        return yaml.safe_load(f)
-   
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_config", type=str, default="config/data_config.yaml")
     parser.add_argument("--model_config", type=str, default="config/model_config.yaml")
     parser.add_argument("--task", type=str, default="FoldClassification")
-    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--go_branch", type=str, default=None, help="MF | BP | CC (required for GeneOntology)")
     
     args = parser.parse_args()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # --------------------------------------------------
     # Load YAML config
@@ -222,18 +240,6 @@ if __name__ == "__main__":
     else:
         num_classes = task_cfg["num_classes"]
     
-    
-    # --------------------------------------------------
-    # Determine criterion
-    # --------------------------------------------------
-
-    task_type = task_cfg["task_type"]
-
-    if task_type == "multilabel_classification":
-        criterion = nn.BCEWithLogitsLoss()
-    else:
-        criterion = nn.CrossEntropyLoss()
-
     # --------------------------------------------------
     # Build DataLoader
     # --------------------------------------------------
@@ -242,6 +248,27 @@ if __name__ == "__main__":
         args.task,
         batch_size=args.batch_size
     )
+    
+    # --------------------------------------------------
+    # Determine criterion
+    # --------------------------------------------------
+    
+    task_type = task_cfg["task_type"]
+    
+    # if task_type == "multilabel_classification":
+    #     criterion = nn.BCEWithLogitsLoss()
+    # else:
+    #     criterion = nn.CrossEntropyLoss()
+
+    if task_type == "multilabel_classification":
+        pos_weight = compute_pos_weight(train_loader, num_classes).to(device)
+        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    else:
+        weights = compute_class_weights(train_loader, num_classes).to(device)
+        criterion = nn.CrossEntropyLoss(
+            weight=weights,
+        )
+    
 
     # --------------------------------------------------
     # Initialize Model

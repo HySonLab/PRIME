@@ -7,14 +7,21 @@ import trimesh
 from scipy.spatial import cKDTree
 from models.emnn_autoencoder import EMNN_AutoEncoder
 from utils.partition import extract_partition_matrices, mesh_simplification_quadric_decimation
-from utils.hierarchical_graph import build_surface_graph
 from glob import glob
 from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
 import yaml
+from sklearn.metrics import roc_auc_score
+from torch.utils.data import random_split
+from tqdm import tqdm
 
+import sys
 import os
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+
+from utils.hierarchical_graph import build_surface_graph
+from utils.utils import add_noise
 
 class SurfaceDataset(Dataset):
 
@@ -26,7 +33,7 @@ class SurfaceDataset(Dataset):
             glob(os.path.join(surface_dir, "*.off"))
         )
 
-        self.surface_files = all_files[:100]
+        self.surface_files = all_files
         
         self.max_faces = max_faces
 
@@ -92,45 +99,106 @@ def collate_surface_graphs(batch):
     return h, x, edge_index, face_index, edge_attr
 
 # ============================================================
-# Negative Sampling
+# Train
 # ============================================================
 
-def sample_negative_edges(n_nodes, edge_index, num_samples):
-    existing = set(zip(edge_index[0].tolist(),
-                       edge_index[1].tolist()))
+def train_epoch(model, loader, optimizer, device):
 
-    neg_i = []
-    neg_j = []
+    model.train()
+    total_loss = 0
 
-    while len(neg_i) < num_samples:
-        i = np.random.randint(0, n_nodes)
-        j = np.random.randint(0, n_nodes)
+    pbar = tqdm(loader, desc="Train", leave=False)
 
-        if i != j and (i, j) not in existing:
-            neg_i.append(i)
-            neg_j.append(j)
+    for h, x, edge_index, face_index, edge_attr in pbar:
 
-    return (
-        torch.LongTensor(neg_i),
-        torch.LongTensor(neg_j)
-    )
+        h = h.to(device)
+        x = x.to(device)
+        edge_index = edge_index.to(device)
+        face_index = face_index.to(device)
+
+        if edge_attr is not None:
+            edge_attr = edge_attr.to(device)
+
+        # ----------------------------
+        # Add noise (with normalization + schedule)
+        # ----------------------------
+        x_noisy, x_target = add_noise(x)
+
+        # ----------------------------
+        # Forward
+        # ----------------------------
+        x_recon = model(
+            h,
+            x_noisy,
+            edge_index,
+            face_index,
+            edge_attr
+        )
+
+        # ----------------------------
+        # Loss (reconstruct normalized coords)
+        # ----------------------------
+        loss = F.mse_loss(x_recon, x_target)
+
+        optimizer.zero_grad()
+        loss.backward()
+
+        # Optional: stabilize training
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
+        optimizer.step()
+
+        total_loss += loss.item()
+
+    return total_loss / len(loader)
 
 # ============================================================
-# Loss
+# Evaluate
 # ============================================================
 
-def edge_loss(pos_logits, neg_logits):
-    pos_labels = torch.ones_like(pos_logits)
-    neg_labels = torch.zeros_like(neg_logits)
+def evaluate_epoch(model, loader, device):
 
-    loss_pos = F.binary_cross_entropy_with_logits(pos_logits, pos_labels)
-    loss_neg = F.binary_cross_entropy_with_logits(neg_logits, neg_labels)
+    model.eval()
+    total_loss = 0
 
-    return loss_pos + loss_neg
+    with torch.no_grad():
 
-# ============================================================
-# Training
-# ============================================================
+        pbar = tqdm(loader, desc="Val", leave=False)
+
+        for h, x, edge_index, face_index, edge_attr in pbar:
+
+            h = h.to(device)
+            x = x.to(device)
+            edge_index = edge_index.to(device)
+            face_index = face_index.to(device)
+
+            if edge_attr is not None:
+                edge_attr = edge_attr.to(device)
+
+            # ----------------------------
+            # Add noise (same as training)
+            # ----------------------------
+            x_noisy, x_target, noise_std = add_noise(x)
+
+            # ----------------------------
+            # Forward
+            # ----------------------------
+            x_recon = model(
+                h,
+                x_noisy,
+                edge_index,
+                face_index,
+                edge_attr
+            )
+
+            # ----------------------------
+            # Loss
+            # ----------------------------
+            loss = F.mse_loss(x_recon, x_target)
+
+            total_loss += loss.item()
+
+    return total_loss / len(loader)
 
 def train(config):
 
@@ -141,17 +209,36 @@ def train(config):
     data_cfg = config["data"]
 
     # --------------------------------------------------------
-    # Dataset
+    # Dataset + Split
     # --------------------------------------------------------
     dataset = SurfaceDataset(
         surface_dir=data_cfg["surface_dir"],
         max_faces=surface_cfg["max_faces"],
     )
 
-    loader = DataLoader(
+    dataset_size = len(dataset)
+    train_size = int(0.8 * dataset_size)
+    val_size = dataset_size - train_size
+
+    generator = torch.Generator().manual_seed(42)
+
+    train_dataset, val_dataset = random_split(
         dataset,
+        [train_size, val_size],
+        generator=generator
+    )
+
+    train_loader = DataLoader(
+        train_dataset,
         batch_size=data_cfg["batch_size"],
         shuffle=True,
+        collate_fn=collate_surface_graphs
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=data_cfg["batch_size"],
+        shuffle=False,
         collate_fn=collate_surface_graphs
     )
 
@@ -169,70 +256,57 @@ def train(config):
     optimizer = Adam(model.parameters(), lr=surface_cfg["lr"])
 
     # --------------------------------------------------------
+    # Logging
+    # --------------------------------------------------------
+    log_path = surface_cfg["log_path"]
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+
+    with open(log_path, "w") as f:
+        f.write("========================================\n")
+        f.write("Surface Denoising Autoencoder Training Log\n")
+        f.write("========================================\n")
+
+    # --------------------------------------------------------
     # Training Loop
     # --------------------------------------------------------
+    best_val_loss = float("inf")
+
     for epoch in range(surface_cfg["epochs"]):
 
-        model.train()
-        total_loss = 0
+        train_loss = train_epoch(model, train_loader, optimizer, device)
+        val_loss = evaluate_epoch(model, val_loader, device)
 
-        for h, x, edge_index, face_index, edge_attr in loader:
+        log_str = (
+            f"Epoch {epoch:03d}\n"
+            f"Train Loss: {train_loss:.6f}\n"
+            f"Val   Loss: {val_loss:.6f}\n"
+            f"----------------------------------------\n"
+        )
 
-            h = h.to(device)
-            x = x.to(device)
-            edge_index = edge_index.to(device)
-            face_index = face_index.to(device)
-            edge_attr = edge_attr.to(device)
+        print(log_str)
 
-            n_nodes = x.size(0)
-            pos_edges = edge_index
+        with open(log_path, "a") as f:
+            f.write(log_str)
 
-            neg_edges = sample_negative_edges(
-                n_nodes=n_nodes,
-                edge_index=edge_index.cpu(),
-                num_samples=pos_edges.shape[1]
-            )
+        # --------------------------------------------------------
+        # Save best model (based on reconstruction loss)
+        # --------------------------------------------------------
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
 
-            neg_edges = (
-                neg_edges[0].to(device),
-                neg_edges[1].to(device)
-            )
+            torch.save({
+                "model_state_dict": model.encoder.state_dict(),
+                "config": config
+            }, surface_cfg["save_path"])
 
-            pos_logits, neg_logits = model(
-                h,
-                x,
-                edge_index,
-                face_index,
-                edge_attr,
-                pos_edges,
-                neg_edges
-            )
-
-            loss = edge_loss(pos_logits, neg_logits)
-
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-            total_loss += loss.item()
-
-        print(f"Epoch {epoch:03d} | Avg Loss {total_loss/len(loader):.4f}")
-
-    # --------------------------------------------------------
-    # Save checkpoint
-    # --------------------------------------------------------
-    os.makedirs(os.path.dirname(surface_cfg["save_path"]), exist_ok=True)
-
-    torch.save({
-        "model_state_dict": model.encoder.state_dict(),
-        "config": config
-    }, surface_cfg["save_path"])
+            with open(log_path, "a") as f:
+                f.write(f"New best model saved (Val Loss={best_val_loss:.6f})\n")
 
     print(f"Encoder saved to {surface_cfg['save_path']}")
     
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, required=True)
+    parser.add_argument("--config", type=str, default="/home/dvnguye2/PRL/config/model_config.yaml")
     args = parser.parse_args()
 
     # --------------------------------------------

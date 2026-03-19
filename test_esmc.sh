@@ -16,7 +16,7 @@ BATCH_SIZE=32
 GO_BRANCH="CC"   # Option: MF, BP, CC
 
 # Optional for FoldClassification
-TEST_SET_SPLIT="family"   # Example: family / superfamily / fold
+TEST_SET_SPLIT="superfamily"   # Example: family / superfamily / fold
 
 echo "===================================="
 echo "Testing Task: $TASK"

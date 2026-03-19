@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==========================================
-# Training Script
+# PRIME Training Script
 # ==========================================
 
 # -----------------------------
@@ -9,23 +9,46 @@
 # -----------------------------
 DATA_CONFIG="/home/dvnguye2/PRL/config/data_config.yaml"
 MODEL_CONFIG="/home/dvnguye2/PRL/config/model_config.yaml"
-TASK="FoldClassification"   # Options: FoldClassification, ECReaction, GeneOntology
+
+TASK="FoldClassification"   # FoldClassification | ECReaction | GeneOntology
+
 BATCH_SIZE=32
 EPOCHS=150
-LR=1e-3
+LR=1e-4
 
+# -----------------------------
 # GPU Selection
-DEVICE_ID=0   # Change this to the GPU you want (0,1,2,...)
+# -----------------------------
+DEVICE_ID=3
 
-# Optional (only used for GeneOntology)
-GO_BRANCH="MF"   # Options: MF, BP, CC
+# -----------------------------
+# Optional (for GeneOntology)
+# -----------------------------
+GO_BRANCH="MF"   # MF | BP | CC
+
+# -----------------------------
+# Hierarchy Ablation
+# -----------------------------
+
+ACTIVE_LEVELS=("surface" "atom" "residue" "sse" "protein")
+READOUT_LEVEL="protein"
+
+# Example ablations:
+# ACTIVE_LEVELS=("residue")
+# READOUT_LEVEL="residue"
+
+# ACTIVE_LEVELS=("atom" "residue")
+# READOUT_LEVEL="residue"
 
 echo "===================================="
-echo "Training Task: $TASK"
+echo "Training PRIME"
+echo "Task: $TASK"
 echo "Batch Size: $BATCH_SIZE"
 echo "Epochs: $EPOCHS"
 echo "LR: $LR"
-echo "Using GPU: $DEVICE_ID"
+echo "GPU: $DEVICE_ID"
+echo "Active Levels: ${ACTIVE_LEVELS[@]}"
+echo "Readout Level: $READOUT_LEVEL"
 echo "===================================="
 
 # -----------------------------
@@ -48,7 +71,9 @@ if [ "$TASK" == "GeneOntology" ]; then
         --batch_size $BATCH_SIZE \
         --epochs $EPOCHS \
         --lr $LR \
-        --go_branch $GO_BRANCH
+        --go_branch $GO_BRANCH \
+        --active_levels ${ACTIVE_LEVELS[@]} \
+        --readout_level $READOUT_LEVEL
 
 else
 
@@ -58,6 +83,8 @@ else
         --task $TASK \
         --batch_size $BATCH_SIZE \
         --epochs $EPOCHS \
-        --lr $LR
+        --lr $LR \
+        --active_levels ${ACTIVE_LEVELS[@]} \
+        --readout_level $READOUT_LEVEL
 
 fi

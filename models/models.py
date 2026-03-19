@@ -12,42 +12,59 @@ from .hierarchical_gnn import HierarchicalGNN
 from .classification_head import MLP_Head
 
 class PRIME(nn.Module):
-
     def __init__(
         self,
         num_classes,
         input_dims,
-        hidden_dim = 512,
+        active_levels,
+        readout_level,
+        hidden_dim=512,
         encoder_layers=3,
         head_hidden_dim=512,
         head_layers=3,
-        dropout=0.1
+        dropout=0.3
     ):
         super().__init__()
 
-        # ------------------------------
-        # Hierarchical Encoder
-        # ------------------------------
+        self.readout_level = readout_level
+
+        # -----------------------------------------
+        # Encoder
+        # -----------------------------------------
         self.encoder = HierarchicalGNN(
             input_dims=input_dims,
+            active_levels=active_levels,
             hidden_dim=hidden_dim,
             n_layers=encoder_layers
         )
 
-        # ------------------------------
-        # Classification Head
-        # ------------------------------
+        # -----------------------------------------
+        # Prediction head
+        # -----------------------------------------
         self.head = MLP_Head(
             in_dim=hidden_dim,
             out_dim=num_classes,
-            hidden_dim=head_hidden_dim,
-            num_layers=head_layers,
-            dropout=dropout
+            hidden_dims=[head_hidden_dim] * head_layers,
+            activations=["gelu"] * head_layers + ["identity"],
+            dropout=dropout,
+            skip=True
         )
 
     def forward(self, graph):
-        protein_embedding = self.encoder(graph)["protein"]
-        logits = self.head(protein_embedding)
+
+        # Encode hierarchy
+        H = self.encoder(graph)
+
+        # Select representation for prediction
+        embedding = H[self.readout_level]
+
+        # If graph has multiple nodes (atom/residue etc.)
+        # we pool them to a graph representation
+        if embedding.dim() == 2:
+            embedding = embedding.mean(dim=0, keepdim=True)
+
+        logits = self.head(embedding)
+
         return logits
 
 class ESMC_Baseline(nn.Module):
@@ -66,20 +83,18 @@ class ESMC_Baseline(nn.Module):
 
         self.client = esm_client
         self.freeze_encoder = freeze_encoder
-        
-        # ------------------------------
-        # Classification Head
-        # ------------------------------
 
         self.head = MLP_Head(
             in_dim=embedding_dim,
             out_dim=num_classes,
-            hidden_dim=head_hidden_dim,
-            num_layers=head_layers,
-            dropout=dropout
+            hidden_dims=[head_hidden_dim] * head_layers,
+            activations=["gelu"] * head_layers + ["identity"],
+            dropout=dropout,
+            skip=True
         )
-        
+
     def forward(self, protein_seqs):
+
         embeddings_list = []
 
         for seq in protein_seqs:
@@ -98,7 +113,8 @@ class ESMC_Baseline(nn.Module):
             )
 
             embeddings = logits_output.embeddings.squeeze()
-            embedding = embeddings[1:-1].mean(dim=0) # Average pooling over sequence dimension, excluding CLS and EOS tokens
+            residue_embeddings = embeddings[1:-1]
+            embedding = residue_embeddings.mean(dim=0)
             embeddings_list.append(embedding)
 
         protein_embedding = torch.stack(embeddings_list, dim=0)

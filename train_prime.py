@@ -1,37 +1,15 @@
 import torch
 import torch.nn as nn
 from models.models import PRIME
-import yaml
-from torch.utils.data import DataLoader
-from utils.dataset import build_graph_dataloaders
 import argparse
 from tqdm import tqdm
-from esm.sdk.api import ESMProtein, LogitsConfig
-from esm.models.esmc import ESMC
 
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+
 from utils.hierarchical_graph import *
-
-def filter_go_labels(y, num_classes):
-
-    offsets = {
-        489: (0, 489),
-        1943: (489, 489 + 1943),
-        320: (489 + 1943, 489 + 1943 + 320)
-    }
-
-    if num_classes not in offsets:
-        raise ValueError("Unknown GO num_classes")
-
-    start, end = offsets[num_classes]
-
-    return [
-        cls - start
-        for cls in y
-        if start <= cls < end
-    ]
+from utils.utils import *
 
 def train_one_epoch(
     model,
@@ -45,20 +23,18 @@ def train_one_epoch(
     model.train()
     total_loss = 0.0
 
+    metric = get_metric(task_type, num_classes, device)
+
     pbar = tqdm(loader, desc="Training", leave=False)
 
     for batch in pbar:
 
-        # ---------------------------------------
-        # Prepare labels
-        # ---------------------------------------
+        # ---------------- Label ----------------
         if task_type == "multilabel_classification":
             labels = torch.zeros(len(batch), num_classes, device=device)
-
             for i, sample in enumerate(batch):
                 y = filter_go_labels(sample["label"], num_classes)
                 labels[i, y] = 1.0
-
         else:
             labels = torch.tensor(
                 [sample["label"] for sample in batch],
@@ -66,22 +42,16 @@ def train_one_epoch(
                 device=device
             )
 
-        # ---------------------------------------
-        # Forward pass
-        # ---------------------------------------
+        # ---------------- Forward ----------------
         logits_list = []
-
         for sample in batch:
             logits = model(sample["graph"])
             logits_list.append(logits.squeeze(0))
 
         logits = torch.stack(logits_list, dim=0)
 
-        # ---------------------------------------
-        # Backward
-        # ---------------------------------------
+        # ---------------- Backward ----------------
         optimizer.zero_grad(set_to_none=True)
-
         loss = criterion(logits, labels)
         loss.backward()
 
@@ -90,7 +60,13 @@ def train_one_epoch(
 
         total_loss += loss.item()
 
-    return total_loss / len(loader)
+        # ---------------- Metric Update ----------------
+        if task_type == "multilabel_classification":
+            metric.update(torch.sigmoid(logits), labels)
+        else:
+            metric.update(logits, labels)
+
+    return total_loss / len(loader), metric.compute().item()
 
 @torch.no_grad()
 def evaluate(
@@ -104,22 +80,18 @@ def evaluate(
     model.eval()
     total_loss = 0.0
 
+    metric = get_metric(task_type, num_classes, device)
+
     pbar = tqdm(loader, desc="Evaluating", leave=False)
 
     for batch in pbar:
 
-        # ---------------------------------------
-        # Prepare labels
-        # ---------------------------------------
+        # ---------------- Label ----------------
         if task_type == "multilabel_classification":
             labels = torch.zeros(len(batch), num_classes, device=device)
-
             for i, sample in enumerate(batch):
-                y = sample["label"]
-                y = filter_go_labels(y, num_classes)
-
-                for cls in y:
-                    labels[i, cls] = 1.0
+                y = filter_go_labels(sample["label"], num_classes)
+                labels[i, y] = 1.0
         else:
             labels = torch.tensor(
                 [sample["label"] for sample in batch],
@@ -127,11 +99,8 @@ def evaluate(
                 device=device
             )
 
-        # ---------------------------------------
-        # Forward pass
-        # ---------------------------------------
+        # ---------------- Forward ----------------
         logits_list = []
-
         for sample in batch:
             logits = model(sample["graph"])
             logits_list.append(logits.squeeze(0))
@@ -141,7 +110,13 @@ def evaluate(
         loss = criterion(logits, labels)
         total_loss += loss.item()
 
-    return total_loss / len(loader)
+        # ---------------- Metric Update ----------------
+        if task_type == "multilabel_classification":
+            metric.update(torch.sigmoid(logits), labels)
+        else:
+            metric.update(logits, labels)
+
+    return total_loss / len(loader), metric.compute().item()
 
 def train_prime(
     model,
@@ -156,6 +131,7 @@ def train_prime(
     epochs=150,
     lr=1e-4,
     patience_es=10,
+    factor=0.6,
     patience_lr=5,
 ):
     
@@ -171,11 +147,11 @@ def train_prime(
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         mode="min",
-        factor=0.6,
+        factor=factor,
         patience=patience_lr
     )
 
-    best_val_loss = float("inf")
+    best_val_metric = 0
     early_stop_counter = 0
 
     # ---- Open log file ----
@@ -189,7 +165,7 @@ def train_prime(
 
         for epoch in range(epochs):
 
-            train_loss = train_one_epoch(
+            train_loss, train_metric = train_one_epoch(
                 model,
                 train_loader,
                 optimizer,
@@ -199,7 +175,7 @@ def train_prime(
                 num_classes
             )
 
-            val_loss = evaluate(
+            val_loss, val_metric = evaluate(
                 model,
                 val_loader,
                 criterion,
@@ -213,18 +189,19 @@ def train_prime(
             # ---- Write to file ----
             log_file.write(f"Epoch {epoch+1:03d}\n")
             log_file.write(f"Train Loss: {train_loss:.6f}\n")
+            log_file.write(f"Train Metric: {train_metric:.6f}\n")
             log_file.write(f"Val   Loss: {val_loss:.6f}\n")
+            log_file.write(f"Val   Metric: {val_metric:.6f}\n")
             log_file.write("-" * 40 + "\n")
             log_file.flush()
 
             print(f"Epoch {epoch+1:03d}")
-            print(f"Train Loss: {train_loss:.4f}")
-            print(f"Val   Loss: {val_loss:.4f}")
+            print(f"Train Loss: {train_loss:.4f} | Train Metric: {train_metric:.4f}")
+            print(f"Val   Loss: {val_loss:.4f} | Val   Metric: {val_metric:.4f}")
             print("-" * 40)
-            log_file.flush()
 
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
+            if val_metric > best_val_metric:
+                best_val_metric = val_metric
                 early_stop_counter = 0
                 torch.save(model.state_dict(), output_path)
                 log_file.write("New best model saved.\n")
@@ -236,38 +213,59 @@ def train_prime(
                 log_file.write("Early stopping triggered.\n")
                 break
 
-        log_file.write(f"Best Val Loss: {best_val_loss:.6f}\n")
+        log_file.write(f"Best Val Metric: {best_val_metric:.6f}\n")
         log_file.write("Training Finished\n")
-
-def load_config(config_path):
-    with open(config_path, "r") as f:
-        return yaml.safe_load(f)
    
 if __name__ == "__main__":
+
     parser = argparse.ArgumentParser()
+
     parser.add_argument("--data_config", type=str, default="config/data_config.yaml")
     parser.add_argument("--model_config", type=str, default="config/model_config.yaml")
     parser.add_argument("--task", type=str, default="FoldClassification")
+
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--go_branch", type=str, default=None, help="MF | BP | CC (required for GeneOntology)")
-    
+
+    parser.add_argument("--go_branch", type=str, default=None,
+                        help="MF | BP | CC (required for GeneOntology)")
+
+    # --------------------------------------------------
+    # Hierarchical settings
+    # --------------------------------------------------
+
+    parser.add_argument(
+        "--active_levels",
+        nargs="+",
+        default=["surface","atom","residue","sse","protein"],
+        help="Hierarchy levels to enable"
+    )
+
+    parser.add_argument(
+        "--readout_level",
+        type=str,
+        default="protein",
+        help="Which level representation to use for prediction"
+    )
+
     args = parser.parse_args()
-    
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # --------------------------------------------------
     # Load YAML config
     # --------------------------------------------------
+
     data_config = load_config(args.data_config)
     task_cfg = data_config["tasks"][args.task]
-    
+
     model_config = load_config(args.model_config)
 
     # --------------------------------------------------
     # Determine num_classes
     # --------------------------------------------------
+
     if args.task == "GeneOntology":
 
         if args.go_branch is None:
@@ -280,18 +278,6 @@ if __name__ == "__main__":
 
     else:
         num_classes = task_cfg["num_classes"]
-    
-    
-    # --------------------------------------------------
-    # Determine criterion
-    # --------------------------------------------------
-
-    task_type = task_cfg["task_type"]
-
-    if task_type == "multilabel_classification":
-        criterion = nn.BCEWithLogitsLoss()
-    else:
-        criterion = nn.CrossEntropyLoss()
 
     # --------------------------------------------------
     # Build Graph DataLoader
@@ -305,32 +291,65 @@ if __name__ == "__main__":
     )
 
     # --------------------------------------------------
+    # Loss function
+    # --------------------------------------------------
+
+    task_type = task_cfg["task_type"]
+    
+    # if task_type == "multilabel_classification":
+    #     criterion = nn.BCEWithLogitsLoss()
+    # else:
+    #     criterion = nn.CrossEntropyLoss()
+
+    if task_type == "multilabel_classification":
+        pos_weight = compute_pos_weight(train_loader, num_classes).to(device)
+        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    else:
+        weights = compute_class_weights(train_loader, num_classes).to(device)
+        criterion = nn.CrossEntropyLoss(
+            weight=weights,
+        )
+
+    # --------------------------------------------------
     # Initialize PRIME model
     # --------------------------------------------------
 
     model = PRIME(
         num_classes=num_classes,
         input_dims=model_config["hierarchical"]["input_dims"],
+        active_levels=args.active_levels,
+        readout_level=args.readout_level,
         hidden_dim=model_config["hierarchical"]["hidden_dim"],
         encoder_layers=model_config["hierarchical"]["n_layers"],
         head_hidden_dim=model_config["head"][args.task]["hidden_dim"],
         head_layers=model_config["head"][args.task]["num_layers"],
         dropout=model_config["head"][args.task]["dropout"]
-    )
+    ).to(device)
+
+    # --------------------------------------------------
+    # Create ablation tag
+    # --------------------------------------------------
+
+    level_tag = "_".join(args.active_levels)
 
     # --------------------------------------------------
     # Output paths
     # --------------------------------------------------
 
     if args.task == "GeneOntology":
-        output_path = f"/home/dvnguye2/PRL/ckpts/best_prime_{args.task}_{args.go_branch}.pt"
-        log_path = f"/home/dvnguye2/PRL/logs/training_log_prime_{args.task}_{args.go_branch}.txt"
+
+        output_path = f"/home/dvnguye2/PRL/ckpts/best_prime_{args.task}_{args.go_branch}_{level_tag}.pt"
+
+        log_path = f"/home/dvnguye2/PRL/logs/training_log_prime_{args.task}_{args.go_branch}_{level_tag}.txt"
+
     else:
-        output_path = f"/home/dvnguye2/PRL/ckpts/best_prime_{args.task}.pt"
-        log_path = f"/home/dvnguye2/PRL/logs/training_log_prime_{args.task}.txt"
+
+        output_path = f"/home/dvnguye2/PRL/ckpts/best_prime_{args.task}_{level_tag}.pt"
+
+        log_path = f"/home/dvnguye2/PRL/logs/training_log_prime_{args.task}_{level_tag}.txt"
 
     # --------------------------------------------------
-    # Train PRIME
+    # Train
     # --------------------------------------------------
 
     train_prime(

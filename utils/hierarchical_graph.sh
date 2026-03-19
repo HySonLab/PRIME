@@ -29,6 +29,8 @@ echo "===================================="
 # ---- Run Python ----
 python ./utils/hierarchical_graph.py \
     --pt_dir "$PT_DIR" \
-    --output_dir "$OUTPUT_DIR"
+    --output_dir "$OUTPUT_DIR" \
+    --use_pretrained_atom_encoder \
+    --use_pretrained_surface_encoder
 
 echo "Finished building graphs for $TASK"

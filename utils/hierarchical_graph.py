@@ -27,6 +27,36 @@ from pymol import cmd
 
 MAX_FACES = 1024
 
+def normalize_coords(x, mode="std", eps=1e-6):
+    """
+    Normalize 3D coordinates.
+
+    Args:
+        x: (N, 3) tensor
+        mode: "std" or "radius"
+        eps: numerical stability
+
+    Returns:
+        normalized x
+    """
+
+    # Center
+    x = x - x.mean(dim=0, keepdim=True)
+
+    if mode == "std":
+        std = x.std(dim=0, keepdim=True)
+        std[std < eps] = 1.0
+        x = x / std
+
+    elif mode == "radius":
+        radius = torch.norm(x, dim=1).max()
+        x = x / (radius + eps)
+
+    else:
+        raise ValueError(f"Unknown mode: {mode}")
+
+    return x
+
 ATOM37_NAMES = [
     "N", "CA", "C", "O", "CB",
     "CG", "CG1", "CG2", "CD", "CD1", "CD2",
@@ -111,54 +141,6 @@ def export_surface(
     cmd.save(output_path, selection)
     cmd.delete("all")
 
-def build_surface_graph(mesh, device):
-    """
-    Build vertex-based surface graph for EMNN.
-
-    Nodes: mesh vertices
-    Edges: mesh edges (true triangle adjacency)
-    Faces: mesh triangles (vertex indices)
-    """
-
-    # --------------------------------------------------
-    # Vertices
-    # --------------------------------------------------
-    vertices = np.asarray(mesh.vertices)
-    faces = np.asarray(mesh.faces)
-
-    x = torch.tensor(vertices, dtype=torch.float32).to(device)
-
-    # --------------------------------------------------
-    # Build edges from faces
-    # Each triangle (i, j, k) gives edges:
-    # (i,j), (j,k), (k,i)
-    # --------------------------------------------------
-    rows, cols = [], []
-
-    for tri in faces:
-        i, j, k = tri
-
-        rows.extend([i, j, k])
-        cols.extend([j, k, i])
-
-        rows.extend([j, k, i])
-        cols.extend([i, j, k])
-
-    edge_index = torch.LongTensor([rows, cols]).to(device)
-
-    # Optional: remove duplicate edges
-    edge_index = torch.unique(edge_index, dim=1)
-
-    # Dummy edge features (can upgrade later)
-    edge_attr = torch.ones(edge_index.shape[1], 1).to(device)
-
-    # --------------------------------------------------
-    # Face index (3, F)
-    # --------------------------------------------------
-    face_index = torch.LongTensor(faces.T).to(device)
-
-    return x, edge_index, face_index, edge_attr
-
 def get_sequence_from_pdb(
     pdb_file: str,
     model_id: int = 0
@@ -196,6 +178,65 @@ def get_sequence_from_pdb(
         sequences[chain.id] = "".join(seq)
 
     return sequences
+
+def build_surface_graph(mesh, device):
+    """
+    Build vertex-based surface graph for EMNN.
+
+    Nodes: mesh vertices
+    Edges: triangle adjacency
+    Faces: triangle indices
+    """
+
+    # --------------------------------------------------
+    # Vertices
+    # --------------------------------------------------
+    vertices = np.asarray(mesh.vertices)
+    faces = np.asarray(mesh.faces)
+
+    x = torch.tensor(vertices, dtype=torch.float32)
+    
+    x = normalize_coords(x)
+
+    # --------------------------------------------------
+    # Build edges from faces (vectorized, NO loop)
+    # --------------------------------------------------
+    # faces: (F, 3)
+    i = faces[:, 0]
+    j = faces[:, 1]
+    k = faces[:, 2]
+
+    # 6 directed edges per triangle
+    edges = np.stack([
+        np.concatenate([i, j, k, j, k, i]),
+        np.concatenate([j, k, i, i, j, k])
+    ], axis=0)
+
+    edge_index = torch.from_numpy(edges).long()
+
+    # Remove duplicates
+    edge_index = torch.unique(edge_index, dim=1)
+
+    # --------------------------------------------------
+    # Edge features
+    # --------------------------------------------------
+    row, col = edge_index
+    edge_attr = torch.norm(x[row] - x[col], dim=1, keepdim=True)
+
+    # --------------------------------------------------
+    # Face index (3, F)
+    # --------------------------------------------------
+    face_index = torch.from_numpy(faces.T).long()
+
+    # --------------------------------------------------
+    # Move to device
+    # --------------------------------------------------
+    x = x.to(device)
+    edge_index = edge_index.to(device)
+    edge_attr = edge_attr.to(device)
+    face_index = face_index.to(device)
+
+    return x, edge_index, face_index, edge_attr
 
 def coarsen_adjacency(
     A_fine: csr_matrix,
@@ -577,8 +618,8 @@ def build_hierarchical_protein_graph(
         pdb_path: str,
         surface_path: str,
         surface_radius: float = 1.0,
-        use_pretrained_atom: bool = False,
-        use_pretrained_surface: bool = False,
+        use_pretrained_atom_encoder: bool = False,
+        use_pretrained_surface_encoder: bool = False,
         atom_encoder=None,
         surface_encoder=None,
         device: str = "cpu"
@@ -621,7 +662,7 @@ def build_hierarchical_protein_graph(
 
     X_surface = get_surface_features(
         mesh,
-        use_pretrained=use_pretrained_surface,
+        use_pretrained=use_pretrained_surface_encoder,
         encoder=surface_encoder,
         device=device,
     )
@@ -645,7 +686,7 @@ def build_hierarchical_protein_graph(
 
     X_atom = get_atom_features(
         structure,
-        use_pretrained=use_pretrained_atom,
+        use_pretrained=use_pretrained_atom_encoder,
         encoder=atom_encoder,
         device=device,
     )
@@ -743,6 +784,18 @@ if __name__ == "__main__":
         help="Directory to save generated graph .pt files"
     )
     
+    parser.add_argument(
+        "--use_pretrained_atom_encoder",
+        action="store_true",
+        help="Use pretrained atom-level features"
+    )
+
+    parser.add_argument(
+        "--use_pretrained_surface_encoder",
+        action="store_true",
+        help="Use pretrained surface-level features"
+    )
+        
     args = parser.parse_args()
     
     # --------------------------------------------------
@@ -777,6 +830,8 @@ if __name__ == "__main__":
             graph = build_hierarchical_protein_graph(
                 pdb_path=reconstructed_pdb_path,
                 surface_path=surface_obj_path,
+                use_pretrained_atom_encoder=args.use_pretrained_atom_encoder,
+                use_pretrained_surface_encoder=args.use_pretrained_surface_encoder
             )
 
             # Save Graph

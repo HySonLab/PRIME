@@ -6,10 +6,9 @@ from tqdm import tqdm
 from torchmetrics.classification import MulticlassAccuracy, MultilabelF1Score
 
 from models.models import ESMC_Baseline
-from esm.sdk.api import ESMProtein, LogitsConfig
 from esm.models.esmc import ESMC
 
-from utils.dataset import build_sequence_dataloaders
+from utils.utils import *
 
 # --------------------------------------------------
 # Load YAML config
@@ -18,7 +17,6 @@ from utils.dataset import build_sequence_dataloaders
 def load_config(path):
     with open(path, "r") as f:
         return yaml.safe_load(f)
-
 
 # --------------------------------------------------
 # GO label filtering

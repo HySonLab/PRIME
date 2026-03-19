@@ -2,7 +2,6 @@ import os
 import yaml
 import torch
 from torch.utils.data import Dataset
-from torch.utils.data import DataLoader
 import torch
 import yaml
 import torch
@@ -155,62 +154,6 @@ class SequenceDataset(Dataset):
 
         return data_sample
 
-def build_sequence_dataloaders(config_path, task_name, batch_size=4, num_workers=0, test_only=False, test_set_split=None):
-
-    if test_only:
-        if test_set_split is None:
-            test_dataset = SequenceDataset(
-                config_path=config_path,
-                task_name=task_name,
-                split="test",
-            )
-        else:
-            test_dataset = SequenceDataset(
-                config_path=config_path,
-                task_name=task_name,
-                split="test",
-                fold_test_type=test_set_split
-            )
-        
-        test_loader = DataLoader(
-            test_dataset,
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=num_workers,
-            collate_fn=lambda x: x
-        )
-        return test_loader
-        
-    train_dataset = SequenceDataset(
-        config_path=config_path,
-        task_name=task_name,
-        split="train",
-    )
-
-    val_dataset = SequenceDataset(
-        config_path=config_path,
-        task_name=task_name,
-        split="val"
-    )
-
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        collate_fn=lambda x: x
-    )
-
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        collate_fn=lambda x: x
-    )
-    
-    return train_loader, val_loader
-
 class GraphDataset(Dataset):
     """
     Dataset for hierarchical graph downstream tasks.
@@ -354,68 +297,6 @@ class GraphDataset(Dataset):
             "graph": graph,
             "label": label
         }
-
-def build_graph_dataloaders(
-    config_path,
-    task_name,
-    batch_size=4,
-    num_workers=0,
-    test_only=False,
-    test_set_split=None,
-    device=None
-):
-
-    if test_only:
-
-        test_dataset = GraphDataset(
-            config_path=config_path,
-            task_name=task_name,
-            split="test",
-            fold_test_type=test_set_split,
-            device=device
-        )
-
-        test_loader = DataLoader(
-            test_dataset,
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=num_workers,
-            collate_fn=lambda x: x
-        )
-
-        return test_loader
-
-    train_dataset = GraphDataset(
-        config_path=config_path,
-        task_name=task_name,
-        split="train",
-        device=device
-    )
-
-    val_dataset = GraphDataset(
-        config_path=config_path,
-        task_name=task_name,
-        split="val",
-        device=device
-    )
-
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        collate_fn=lambda x: x
-    )
-
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        collate_fn=lambda x: x
-    )
-
-    return train_loader, val_loader
 
 if __name__ == "__main__":
     

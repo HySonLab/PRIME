@@ -9,7 +9,7 @@
 # -----------------------------
 DATA_CONFIG="/home/dvnguye2/PRL/config/data_config.yaml"
 MODEL_CONFIG="/home/dvnguye2/PRL/config/model_config.yaml"
-TASK="ECReaction"   # Options: FoldClassification, ECReaction, GeneOntology
+TASK="FoldClassification"   # Options: FoldClassification, ECReaction, GeneOntology
 BATCH_SIZE=32
 EPOCHS=150
 LR=1e-3
