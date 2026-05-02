@@ -1,14 +1,20 @@
 from torch import nn
 import torch
+import torch.nn.functional as F
 from .egnn import EGNN
 
+
 class EGNN_AutoEncoder(nn.Module):
-    def __init__(self, in_node_nf, hidden_nf, latent_dim,
-                 in_edge_nf=0, n_layers=4):
+    def __init__(self,
+                 in_node_nf,
+                 hidden_nf,
+                 latent_dim,
+                 in_edge_nf=0,
+                 n_layers=4):
         super().__init__()
 
         # ----------------------------
-        # Encoder
+        # Encoder (EGNN)
         # ----------------------------
         self.encoder = EGNN(
             in_node_nf=in_node_nf,
@@ -19,9 +25,11 @@ class EGNN_AutoEncoder(nn.Module):
         )
 
         # ----------------------------
-        # Coordinate Decoder
+        # Noise Decoder
         # ----------------------------
         self.coord_decoder = nn.Sequential(
+            nn.Linear(latent_dim, latent_dim),
+            nn.SiLU(),
             nn.Linear(latent_dim, latent_dim),
             nn.SiLU(),
             nn.Linear(latent_dim, 3)
@@ -29,17 +37,15 @@ class EGNN_AutoEncoder(nn.Module):
 
     def forward(self, h, x_noisy, edge_index, edge_attr=None):
         """
-        Input:
-            h         : node features
-            x_noisy   : noisy coordinates
-        Output:
-            x_recon   : reconstructed coordinates
-        """
+        Predict noise (residual) for denoising.
 
-        # Encode (EGNN returns updated node features and coords)
+        Returns:
+            pred_noise : (N, 3)
+        """
+        # Encode
         z, _ = self.encoder(h, x_noisy, edge_index, edge_attr)
 
-        # Decode coordinates
-        x_recon = self.coord_decoder(z)
+        # Predict noise residual
+        pred_noise = self.coord_decoder(z)
 
-        return x_recon
+        return pred_noise

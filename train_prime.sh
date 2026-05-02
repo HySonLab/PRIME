@@ -10,10 +10,10 @@
 DATA_CONFIG="/home/dvnguye2/PRL/config/data_config.yaml"
 MODEL_CONFIG="/home/dvnguye2/PRL/config/model_config.yaml"
 
-TASK="FoldClassification"   # FoldClassification | ECReaction | GeneOntology
+TASK="BindingSite"   # FoldClassification | ECReaction | GeneOntology | BindingSite
 
 BATCH_SIZE=32
-EPOCHS=150
+EPOCHS=200
 LR=1e-4
 
 # -----------------------------
@@ -24,31 +24,37 @@ DEVICE_ID=3
 # -----------------------------
 # Optional (for GeneOntology)
 # -----------------------------
-GO_BRANCH="MF"   # MF | BP | CC
+GO_BRANCH="CC"   # MF | BP | CC
 
 # -----------------------------
 # Hierarchy Ablation
 # -----------------------------
-
 ACTIVE_LEVELS=("surface" "atom" "residue" "sse" "protein")
-READOUT_LEVEL="protein"
+READOUT_LEVEL="residue"
 
-# Example ablations:
-# ACTIVE_LEVELS=("residue")
-# READOUT_LEVEL="residue"
+# -----------------------------
+# Cross-Attention Option
+# -----------------------------
+CROSS_ATTENTION="false"  # true or false
 
-# ACTIVE_LEVELS=("atom" "residue")
-# READOUT_LEVEL="residue"
+# -----------------------------
+# Resume Option
+# Set to checkpoint path to resume, or empty to train from scratch
+# -----------------------------
+# RESUME=""
+RESUME="/home/dvnguye2/PRL/ckpts/best_prime_BindingSite_surface_atom_residue_sse_protein.pt"
 
 echo "===================================="
 echo "Training PRIME"
-echo "Task: $TASK"
-echo "Batch Size: $BATCH_SIZE"
-echo "Epochs: $EPOCHS"
-echo "LR: $LR"
-echo "GPU: $DEVICE_ID"
-echo "Active Levels: ${ACTIVE_LEVELS[@]}"
-echo "Readout Level: $READOUT_LEVEL"
+echo "Task:            $TASK"
+echo "Batch Size:      $BATCH_SIZE"
+echo "Epochs:          $EPOCHS"
+echo "LR:              $LR"
+echo "GPU:             $DEVICE_ID"
+echo "Active Levels:   ${ACTIVE_LEVELS[@]}"
+echo "Readout Level:   $READOUT_LEVEL"
+echo "Cross Attention: $CROSS_ATTENTION"
+echo "Resume:          ${RESUME:-none}"
 echo "===================================="
 
 # -----------------------------
@@ -57,34 +63,36 @@ echo "===================================="
 export CUDA_VISIBLE_DEVICES=$DEVICE_ID
 
 # -----------------------------
-# Run training
+# Build base command
 # -----------------------------
+CMD="python train_prime.py \
+    --data_config $DATA_CONFIG \
+    --model_config $MODEL_CONFIG \
+    --task $TASK \
+    --batch_size $BATCH_SIZE \
+    --epochs $EPOCHS \
+    --lr $LR \
+    --active_levels ${ACTIVE_LEVELS[@]} \
+    --readout_level $READOUT_LEVEL"
 
-if [ "$TASK" == "GeneOntology" ]; then
-
-    echo "GO Branch: $GO_BRANCH"
-
-    python train_prime.py \
-        --data_config $DATA_CONFIG \
-        --model_config $MODEL_CONFIG \
-        --task $TASK \
-        --batch_size $BATCH_SIZE \
-        --epochs $EPOCHS \
-        --lr $LR \
-        --go_branch $GO_BRANCH \
-        --active_levels ${ACTIVE_LEVELS[@]} \
-        --readout_level $READOUT_LEVEL
-
-else
-
-    python train_prime.py \
-        --data_config $DATA_CONFIG \
-        --model_config $MODEL_CONFIG \
-        --task $TASK \
-        --batch_size $BATCH_SIZE \
-        --epochs $EPOCHS \
-        --lr $LR \
-        --active_levels ${ACTIVE_LEVELS[@]} \
-        --readout_level $READOUT_LEVEL
-
+# add cross_attention flag if enabled
+if [ "$CROSS_ATTENTION" == "true" ]; then
+    CMD="$CMD --cross_attention"
 fi
+
+# add go_branch if GeneOntology
+if [ "$TASK" == "GeneOntology" ]; then
+    echo "GO Branch: $GO_BRANCH"
+    CMD="$CMD --go_branch $GO_BRANCH"
+fi
+
+# add resume if set
+if [ -n "$RESUME" ]; then
+    echo "Resuming from: $RESUME"
+    CMD="$CMD --resume \"$RESUME\""
+fi
+
+# -----------------------------
+# Run
+# -----------------------------
+eval $CMD

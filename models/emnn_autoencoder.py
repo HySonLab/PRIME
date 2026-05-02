@@ -1,11 +1,12 @@
 from torch import nn
 import torch
-from .emnn import EMNN 
+import torch.nn.functional as F
+from .emnn import EMNN
+
 
 class EMNN_AutoEncoder(nn.Module):
     """
-    Denoising autoencoder using EMNN encoder.
-    Suitable for mesh/surface graphs with face_index.
+    Denoising model for surface graphs using EMNN.
     """
 
     def __init__(self,
@@ -29,35 +30,31 @@ class EMNN_AutoEncoder(nn.Module):
         )
 
         # ----------------------------
-        # Coordinate Decoder
+        # Noise Decoder
         # ----------------------------
         self.coord_decoder = nn.Sequential(
+            nn.Linear(latent_dim, latent_dim),
+            nn.SiLU(),
             nn.Linear(latent_dim, latent_dim),
             nn.SiLU(),
             nn.Linear(latent_dim, 3)
         )
 
-    # =====================================================
-    # Forward
-    # =====================================================
     def forward(self,
                 h,
                 x_noisy,
                 edge_index,
                 face_index,
                 edge_attr=None):
-
         """
-        Input:
-            h         : node features
-            x_noisy   : noisy coordinates
-        Output:
-            x_recon   : reconstructed coordinates
+        Predict noise (residual) for denoising.
+
+        Returns:
+            pred_noise : (N, 3)
+            x_updated  : EMNN-updated coordinates
         """
 
-        # ----------------------------
-        # Encode with EMNN
-        # ----------------------------
+        # Encode
         z, _ = self.encoder(
             h,
             x_noisy,
@@ -66,9 +63,10 @@ class EMNN_AutoEncoder(nn.Module):
             edge_attr
         )
 
-        # ----------------------------
-        # Decode coordinates
-        # ----------------------------
-        x_recon = self.coord_decoder(z)
+        # Stabilize latent
+        z = F.normalize(z, dim=-1)
 
-        return x_recon
+        # Predict noise
+        pred_noise = self.coord_decoder(z)
+
+        return pred_noise

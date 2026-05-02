@@ -19,122 +19,10 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 
-from utils.utils import add_noise, normalize_coords
+from utils.helpers import add_noise, normalize_coords
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
-class AtomicDataset(Dataset):
-    def __init__(self, pdb_dir, k):
-
-        all_files = sorted(glob(os.path.join(pdb_dir, "*.pdb")))
-        self.pdb_files = all_files
-        self.k = k
-        print(f"Found {len(self.pdb_files)} PDB files")
-
-    def __len__(self):
-        return len(self.pdb_files)
-
-    def __getitem__(self, idx):
-
-        pdb_path = self.pdb_files[idx]
-
-        h, x, edge_index, edge_attr = build_atomic_graph_from_pdb(
-            pdb_path,
-            k=self.k,
-            device="cpu"
-        )
-
-        return h, x, edge_index, edge_attr
-    
-def atom_type_encoding(atom_name):
-    atom_types = ['C', 'N', 'O', 'S', 'P', 'H']
-    
-    encoding = [0] * len(atom_types)
-    
-    first_char = atom_name[0]
-    if first_char in atom_types:
-        encoding[atom_types.index(first_char)] = 1
-    
-    return encoding
-
-def collate_graphs(batch):
-
-    h_list = []
-    x_list = []
-    edge_index_list = []
-    edge_attr_list = []
-
-    node_offset = 0
-
-    for h, x, edge_index, edge_attr in batch:
-
-        h_list.append(h)
-        x_list.append(x)
-
-        # Shift edge indices
-        edge_index = edge_index + node_offset
-        edge_index_list.append(edge_index)
-
-        edge_attr_list.append(edge_attr)
-
-        node_offset += h.size(0)
-
-    h = torch.cat(h_list, dim=0)
-    x = torch.cat(x_list, dim=0)
-    edge_index = torch.cat(edge_index_list, dim=1)
-    edge_attr = torch.cat(edge_attr_list, dim=0)
-
-    return h, x, edge_index, edge_attr
-
-def build_atomic_graph_from_pdb(
-    pdb_path,
-    k=8,
-    device="cpu",
-    max_atoms=2048
-):
-
-    parser = PDBParser(QUIET=True)
-    structure = parser.get_structure("protein", pdb_path)
-
-    coords = []
-    features = []
-
-    for atom in structure.get_atoms():
-
-        if atom.element == 'H':
-            continue
-
-        coords.append(atom.coord)
-        features.append(atom_type_encoding(atom.get_name()))
-
-    coords = np.array(coords)
-    features = np.array(features)
-
-    # --------------------------------------------------------
-    # Subsample atoms if too large
-    # --------------------------------------------------------
-    if len(coords) > max_atoms:
-        idx = np.random.choice(len(coords), max_atoms, replace=False)
-        coords = coords[idx]
-        features = features[idx]
-
-    # --------------------------------------------------------
-    # Convert to torch
-    # --------------------------------------------------------
-    coords = torch.from_numpy(coords).float()
-    coords = normalize_coords(coords)
-    
-    h = torch.from_numpy(features).float()
-
-    # --------------------------------------------------------
-    # KNN Graph
-    # --------------------------------------------------------
-    edge_index = knn_graph(coords, k=k, loop=False)
-
-    row, col = edge_index
-    dist = torch.norm(coords[row] - coords[col], dim=1, keepdim=True)
-
-    edge_attr = dist
-
-    return h, coords, edge_index, edge_attr
+from utils.dataset import AtomicDataset, collate_graphs
 
 # ============================================================
 # Train
@@ -159,27 +47,38 @@ def train_epoch(model, loader, optimizer, device):
         # ----------------------------
         # Add noise
         # ----------------------------
-        x_noisy, x_target = add_noise(x)
+        x_noisy, x_clean, noise_std = add_noise(x)
+        noise_std = float(noise_std)
+        
+        target = x_clean - x_noisy
 
         # ----------------------------
         # Forward
         # ----------------------------
-        x_recon = model(
-            h,
-            x_noisy,
-            edge_index,
-            edge_attr
+        pred_noise = model(
+            h, x_noisy, edge_index, edge_attr
         )
 
         # ----------------------------
-        # Loss (reconstruct normalized coords)
+        # Denoising MSE loss
         # ----------------------------
-        loss = F.mse_loss(x_recon, x_target)
+        loss = ((pred_noise - target) ** 2).mean(dim=-1)
+        loss = loss.mean()
 
+        # ----------------------------
+        # Smoothness regularization
+        # ----------------------------
+        row, col = edge_index
+        smooth_loss = ((pred_noise[row] - pred_noise[col]) ** 2).mean()
+
+        loss = loss + 0.01 * smooth_loss
+
+        # ----------------------------
+        # Backprop
+        # ----------------------------
         optimizer.zero_grad()
         loss.backward()
 
-        # Optional: stabilize training
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
         optimizer.step()
@@ -187,7 +86,6 @@ def train_epoch(model, loader, optimizer, device):
         total_loss += loss.item()
 
     return total_loss / len(loader)
-
 
 # ============================================================
 # Evaluate
@@ -212,14 +110,18 @@ def evaluate_epoch(model, loader, device):
                 edge_attr = edge_attr.to(device)
 
             # ----------------------------
-            # Add noise (same as training)
+            # Add noise
             # ----------------------------
-            x_noisy, x_target, noise_std = add_noise(x)
+            x_noisy, x_clean, noise_std = add_noise(x)
+            noise_std = float(noise_std)
+
+            # Target = noise (residual)
+            target = x_clean - x_noisy
 
             # ----------------------------
             # Forward
             # ----------------------------
-            x_recon = model(
+            pred_noise = model(
                 h,
                 x_noisy,
                 edge_index,
@@ -227,9 +129,10 @@ def evaluate_epoch(model, loader, device):
             )
 
             # ----------------------------
-            # Loss
+            # Denoising MSE loss
             # ----------------------------
-            loss = F.mse_loss(x_recon, x_target)
+            loss = ((pred_noise - target) ** 2).mean(dim=-1)
+            loss = loss.mean()
 
             total_loss += loss.item()
 
@@ -289,6 +192,7 @@ def train(config):
     ).to(device)
 
     optimizer = Adam(model.parameters(), lr=atom_cfg["lr"])
+    scheduler = CosineAnnealingLR(optimizer, T_max=atom_cfg["epochs"], eta_min=1e-5)
 
     # --------------------------------------------------------
     # Logging
@@ -310,11 +214,13 @@ def train(config):
 
         train_loss = train_epoch(model, train_loader, optimizer, device)
         val_loss = evaluate_epoch(model, val_loader, device)
+        scheduler.step()
 
         log_str = (
             f"Epoch {epoch:03d}\n"
             f"Train Loss: {train_loss:.6f}\n"
             f"Val   Loss: {val_loss:.6f}\n"
+            f"LR:         {scheduler.get_last_lr()[0]:.2e}\n"
             f"----------------------------------------\n"
         )
 

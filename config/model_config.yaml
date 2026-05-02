@@ -2,10 +2,8 @@
 # Data
 # =========================================
 data:
-  # pdb_dir: /home/dvnguye2/PRL/data/pretrain_data/pdb_data
-  # surface_dir: /home/dvnguye2/PRL/data/pretrain_data/surface_data
-  pdb_dir: /home/dvnguye2/PRL/data/pretrain_data/surface_data/01-benchmark_pdbs
-  surface_dir: /home/dvnguye2/PRL/data/pretrain_data/surface_data/01-benchmark_surfaces
+  pdb_dir: /home/dvnguye2/PRL/data/pretrain_data/01-benchmark_pdbs
+  surface_dir: /home/dvnguye2/PRL/data/pretrain_data/01-benchmark_surfaces
   batch_size: 32
 
 # =========================================
@@ -13,11 +11,11 @@ data:
 # =========================================
 atom:
   k: 8
-  atom_feat_dim: 6
+  atom_feat_dim: 7
   hidden_dim: 256
   latent_dim: 128
-  n_layers: 4
-  lr: 0.0001
+  n_layers: 3
+  lr: 0.001
   epochs: 50
   save_path: /home/dvnguye2/PRL/ckpts/atom_egnn_encoder.pt
   log_path: /home/dvnguye2/PRL/logs/training_log_atom_encoder.txt
@@ -29,10 +27,10 @@ surface:
   input_dim: 16
   hidden_dim: 256
   latent_dim: 128
-  n_layers: 4
-  lr: 0.0001
-  epochs: 50
+  n_layers: 3
+  lr: 0.001
   max_faces: 1024
+  epochs: 50
   save_path: /home/dvnguye2/PRL/ckpts/surface_emnn_encoder.pt
   log_path: /home/dvnguye2/PRL/logs/training_log_surface_encoder.txt
 
@@ -41,17 +39,15 @@ surface:
 # =========================================
 
 hierarchical:
-  hidden_dim: 512
+  hidden_dim: 128
   n_layers: 3
-  dropout: 0.5
+  dropout: 0.3
   input_dims:
-    # surface: 128
-    # atom: 128
-    surface: 3
-    atom: 7
-    residue: 1152
-    sse: 1152
-    protein: 1152
+    surface: 130    # encoder output
+    atom: 128       # encoder output
+    residue: 23     # one-hot + angles
+    sse: 4          # now one-hot type (3) + length (1)
+    protein: 1280   # ESM-2 CLS token
   
 # =========================================
 # Output Heads
@@ -59,16 +55,21 @@ hierarchical:
 
 head:
   FoldClassification:
-    hidden_dim: 512
+    hidden_dim: 128
     num_layers: 3
-    dropout: 0.5
+    dropout: 0.3
 
   ECReaction:
-    hidden_dim: 512
+    hidden_dim: 128
     num_layers: 3
-    dropout: 0.5
+    dropout: 0.3
 
   GeneOntology:
-    hidden_dim: 512
+    hidden_dim: 128
     num_layers: 3
-    dropout: 0.5
+    dropout: 0.3
+
+  BindingSite:
+    hidden_dim: 128
+    num_layers: 3
+    dropout: 0.3

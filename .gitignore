@@ -17,3 +17,6 @@ __pycache__/
 # Ignore Jupyter Notebook
 tmp/
 
+# Ignore plots
+plots/
+

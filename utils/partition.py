@@ -15,6 +15,24 @@ import open3d as o3d
 
 MAX_FACES = 1024
 
+ATOM37_NAMES = [
+    "N", "CA", "C", "O", "CB",
+    "CG", "CG1", "CG2", "CD", "CD1", "CD2",
+    "CE", "CE1", "CE2", "CE3",
+    "CZ", "CZ2", "CZ3",
+    "CH2",
+    "ND1", "ND2", "NE", "NE1", "NE2",
+    "NH1", "NH2",
+    "NZ",
+    "OD1", "OD2",
+    "OE1", "OE2",
+    "OG", "OG1",
+    "OH",
+    "SD",
+    "SG",
+    "OXT"
+]
+
 def mesh_simplification_quadric_decimation(mesh, target_faces):
     """
     Simplify mesh using Open3D's quadric decimation.
@@ -54,212 +72,6 @@ def mesh_simplification_quadric_decimation(mesh, target_faces):
 
     return simplified_mesh
 
-def build_atom_to_residue_assignment(
-    structure: Structure,
-    include_hetero: bool = False
-):
-    """
-    Build atom -> residue assignment matrix from a parsed PDB structure.
-
-    Parameters
-    ----------
-    structure : Bio.PDB.Structure.Structure
-        Parsed PDB structure.
-    include_hetero : bool, optional
-        Whether to include hetero atoms (HETATM). Default is False.
-
-    Returns
-    -------
-    Pi : scipy.sparse.csr_matrix, shape (N_atoms, N_residues)
-        Atom-to-residue assignment matrix.
-    """
-
-    residue_keys = []
-
-    for model in structure:
-        for chain in model:
-            for residue in chain:
-                hetero_flag, _, _ = residue.id
-
-                if not include_hetero and hetero_flag.strip():
-                    continue
-
-                res_key = (chain.id, residue.id)
-
-                for _ in residue:
-                    residue_keys.append(res_key)
-
-    # --- residue indexing ---
-    unique_residues = list(dict.fromkeys(residue_keys))
-    residue_to_index = {res: i for i, res in enumerate(unique_residues)}
-
-    N_atoms = len(residue_keys)
-    N_res = len(unique_residues)
-
-    rows = np.arange(N_atoms)
-    cols = np.array([residue_to_index[rk] for rk in residue_keys])
-    data = np.ones(N_atoms, dtype=np.int8)
-
-    Pi = csr_matrix((data, (rows, cols)), shape=(N_atoms, N_res))
-
-    # --- sanity ---
-    assert np.all(Pi.sum(axis=1).A1 == 1)
-    assert np.all(Pi.sum(axis=0).A1 > 0)
-
-    return Pi
-
-def build_residue_to_sse_assignment(
-    structure: Structure,
-    include_hetero: bool = False
-):
-    """
-    Build residue -> secondary structure element assignment matrix
-    using pydssp, from a parsed PDB structure.
-
-    Parameters
-    ----------
-    structure : Bio.PDB.Structure.Structure
-        Parsed PDB structure.
-    include_hetero : bool, optional
-        Whether to include hetero residues (default: False).
-
-    Returns
-    -------
-    Pi : scipy.sparse.csr_matrix, shape (N_residues, N_SSEs)
-        Residue-to-secondary-structure-element assignment matrix.
-    """
-
-    backbone_atoms = ["N", "CA", "C", "O"]
-
-    coords = []
-    residue_indices = []  # keeps residue order consistent
-
-    # --- Extract backbone coordinates per residue ---
-    for model in structure:
-        for chain in model:
-            for residue in chain:
-                hetero_flag, _, _ = residue.id
-
-                if not include_hetero and hetero_flag.strip():
-                    continue
-
-                # ensure residue has full backbone
-                if not all(atom_name in residue for atom_name in backbone_atoms):
-                    continue
-
-                residue_indices.append((chain.id, residue.id))
-
-                atom_coords = []
-                for atom_name in backbone_atoms:
-                    atom_coords.append(residue[atom_name].coord)
-
-                coords.append(atom_coords)
-
-    if len(coords) == 0:
-        raise ValueError("No valid residues with complete backbone found.")
-
-    # shape: (L, 4, 3)
-    coord_array = np.asarray(coords, dtype=np.float32)   # (L, 4, 3)
-    coord_tensor = torch.from_numpy(coord_array)
-
-    # --- Run pydssp ---
-    dssp = pydssp.assign(coord_tensor, out_type="index")
-    labels = dssp.cpu().numpy().tolist()  # 0: loop, 1: helix, 2: strand
-
-    N_res = len(labels)
-
-    # --- Group residues into SSE segments ---
-    sse_ids = np.zeros(N_res, dtype=np.int32)
-    current_sse = 0
-    sse_ids[0] = current_sse
-
-    for i in range(1, N_res):
-        if labels[i] != labels[i - 1]:
-            current_sse += 1
-        sse_ids[i] = current_sse
-
-    N_sse = current_sse + 1
-
-    # --- Build assignment matrix ---
-    rows = np.arange(N_res)
-    cols = sse_ids
-    data = np.ones(N_res, dtype=np.int8)
-
-    Pi = csr_matrix((data, (rows, cols)), shape=(N_res, N_sse))
-
-    # --- Sanity checks ---
-    assert np.all(Pi.sum(axis=1).A1 == 1)
-    assert np.all(Pi.sum(axis=0).A1 > 0)
-
-    return Pi
-
-def build_surface_to_atom_assignment(
-    structure: Structure,
-    surface_path: str,
-    include_hetero: bool = False
-):
-    """
-    Build surface vertex -> atom assignment matrix using spatial proximity.
-
-    Parameters
-    ----------
-    structure : Bio.PDB.Structure.Structure
-        Parsed PDB structure.
-    surface_path : str
-        Path to surface mesh file (OBJ format).
-    include_hetero : bool, optional
-        Whether to include hetero atoms (HETATM). Default is False.
-
-    Returns
-    -------
-    Pi : scipy.sparse.csr_matrix, shape (N_vertices, N_atoms)
-        Surface vertex-to-atom assignment matrix.
-    """
-
-    # --- Load surface vertices ---
-    mesh = trimesh.load(surface_path)
-    mesh = mesh_simplification_quadric_decimation(mesh, target_faces=MAX_FACES)
-    surface_vertices = np.asarray(mesh.vertices)   # (Nv, 3)
-    surface_faces = np.asarray(mesh.faces)         # (Nf, 3)
-    face_centroids = surface_vertices[surface_faces].mean(axis=1)
-
-    print(f"Number of vertices: {surface_vertices.shape[0]}")
-    print(f"Number of faces:    {surface_faces.shape[0]}")
-
-    # --- Extract atom coordinates and indices ---
-    atom_coords = []
-    
-    for model in structure:
-        for chain in model:
-            for residue in chain:
-                hetero_flag, _, _ = residue.id
-
-                if not include_hetero and hetero_flag.strip():
-                    continue
-
-                for atom in residue:
-                    atom_coords.append(atom.coord)
-
-    if len(atom_coords) == 0:
-        raise ValueError("No valid atoms found in structure.")
-
-    atom_coords = np.asarray(atom_coords, dtype=np.float32)  # shape: (N_atoms, 3)
-
-    # --- Build KD-tree and query nearest atoms for each vertex ---
-    kdtree = cKDTree(atom_coords)
-    distances, nearest_atom_indices = kdtree.query(face_centroids, k=1)
-
-    N_faces = face_centroids.shape[0]
-    N_atoms = atom_coords.shape[0]
-
-    rows = np.arange(N_faces)
-    cols = nearest_atom_indices
-    data = np.ones(N_faces, dtype=np.int8)
-
-    Pi = csr_matrix((data, (rows, cols)), shape=(N_faces, N_atoms))
-    
-    return Pi
-
 def print_structure_info(
     structure: Structure,
     include_hetero: bool = False
@@ -289,56 +101,153 @@ def print_structure_info(
                 num_residues += 1
                 num_atoms += len(residue)
 
-    print("Number of residues:", num_residues)
-    print("Number of atoms:   ", num_atoms)
-    
-def extract_partition_matrices(
-    pdb_path: str | None = None,
-    surface_path: str | None = None,
-) -> Dict[str, "torch.Tensor"]:
+    # print("Number of residues:", num_residues)
+    # print("Number of atoms:   ", num_atoms)
+
+def build_atom_to_residue_assignment(process_data):
     """
-    Extract all hierarchical partition matrices for a protein structure.
+    Build atom -> residue assignment from processed .pt data.
+    """
+    coords_np        = process_data.coords.numpy()  # (N_res, 37, 3)
 
-    Parameters
-    ----------
-    pdb_path : str, optional
-        Path to the original PDB file (needed for surface generation).
-    surface_path : str, optional
-        Path to precomputed surface OBJ file. If not provided,
-        it will be inferred from pdb_path.
+    atom_to_residue = []
 
-    Returns
-    -------
-    partitions : dict
-        Dictionary containing partition matrices:
-        - 'surface_to_atom'
-        - 'atom_to_residue'
-        - 'residue_to_sse'
+    for res_idx in range(coords_np.shape[0]):
+        for atom_idx in range(coords_np.shape[1]):
+            x, y, z = coords_np[res_idx, atom_idx]
+
+            if np.linalg.norm([x, y, z]) < 1e-4:
+                continue
+
+            atom_name = ATOM37_NAMES[atom_idx]
+            if atom_name[0] == "H":
+                continue
+
+            atom_to_residue.append(res_idx)
+
+    N_atoms = len(atom_to_residue)
+    N_res   = coords_np.shape[0]
+
+    rows = np.arange(N_atoms)
+    cols = np.array(atom_to_residue, dtype=np.int32)
+    data = np.ones(N_atoms, dtype=np.int8)
+
+    Pi = csr_matrix((data, (rows, cols)), shape=(N_atoms, N_res))
+
+    assert np.all(Pi.sum(axis=1).A1 == 1)
+    assert np.all(Pi.sum(axis=0).A1 > 0)
+
+    return Pi
+
+def build_residue_to_sse_assignment(process_data):
+    """
+    Build residue → SSE assignment from processed .pt data.
+    Guaranteed to preserve residue count and indexing.
     """
 
-    partitions = {}
-    
-    if pdb_path is not None:
-        # --- Parse PDB---
-        parser_pdb = PDBParser(QUIET=True)
-        structure = parser_pdb.get_structure("protein", pdb_path)
-        
-        print_structure_info(structure)
+    coords_np = process_data.coords.numpy()  # (N_res, 37, 3)
+    backbone  = coords_np[:, :4, :]          # (N_res, 4, 3)
+    N_res     = backbone.shape[0]
 
-    Pi_surface_to_atom = build_surface_to_atom_assignment(
-        structure, surface_path
+    # --------------------------------------------------
+    # Determine which residues have valid backbone
+    # --------------------------------------------------
+    valid = np.array([
+        all(np.linalg.norm(backbone[i, j]) > 1e-4 for j in range(4))
+        for i in range(N_res)
+    ])
+
+    # --------------------------------------------------
+    # Run DSSP only on valid residues
+    # --------------------------------------------------
+    labels = np.zeros(N_res, dtype=np.int32)  # default = loop (0)
+
+    if valid.any():
+        coord_tensor = torch.from_numpy(
+            backbone[valid].astype(np.float32)
+        )
+        dssp_labels = (
+            pydssp.assign(coord_tensor, out_type="index")
+            .cpu()
+            .numpy()
+        )
+        labels[valid] = dssp_labels
+
+    # --------------------------------------------------
+    # Build SSE segments (over ALL residues)
+    # --------------------------------------------------
+    sse_ids    = np.zeros(N_res, dtype=np.int32)
+    current    = 0
+    sse_ids[0] = 0
+
+    for i in range(1, N_res):
+        if labels[i] != labels[i - 1]:
+            current += 1
+        sse_ids[i] = current
+
+    N_sse = current + 1
+
+    Pi = csr_matrix(
+        (
+            np.ones(N_res, dtype=np.int8),
+            (np.arange(N_res), sse_ids)
+        ),
+        shape=(N_res, N_sse)
     )
+
+    return Pi, labels.tolist()
+
+def build_surface_to_atom_assignment(process_data, surface_path):
+    """
+    Build surface face -> atom assignment using atom coords from .pt data.
+    """
+    coords_np   = process_data.coords.numpy()  # (N_res, 37, 3)
+
+    atom_coords = []
+    for res_idx in range(coords_np.shape[0]):
+        for atom_idx in range(coords_np.shape[1]):
+            x, y, z = coords_np[res_idx, atom_idx]
+            if np.linalg.norm([x, y, z]) < 1e-4:
+                continue
+            atom_name = ATOM37_NAMES[atom_idx]
+            if atom_name[0] == "H":
+                continue
+            atom_coords.append([x, y, z])
+
+    atom_coords = np.array(atom_coords, dtype=np.float32)
+
+    mesh           = trimesh.load(surface_path)
+    mesh           = mesh_simplification_quadric_decimation(mesh, target_faces=MAX_FACES)
+    face_centroids = np.asarray(mesh.vertices)[np.asarray(mesh.faces)].mean(axis=1)
+
+    kdtree = cKDTree(atom_coords)
+    _, nearest_atom_indices = kdtree.query(face_centroids, k=1)
+
+    N_faces = face_centroids.shape[0]
+    N_atoms = atom_coords.shape[0]
+
+    Pi = csr_matrix(
+        (np.ones(N_faces, dtype=np.int8), (np.arange(N_faces), nearest_atom_indices)),
+        shape=(N_faces, N_atoms)
+    )
+
+    return Pi
+
+def extract_partition_matrices(
+    surface_path: str,
+    process_data,
+):
+    partitions = {}
+
+    Pi_surface_to_atom = build_surface_to_atom_assignment(process_data, surface_path)
     partitions["surface_to_atom"] = Pi_surface_to_atom
 
-    # ---------- Atom to Residue ----------
-    Pi_atom_to_res = build_atom_to_residue_assignment(structure)
+    Pi_atom_to_res = build_atom_to_residue_assignment(process_data)
     partitions["atom_to_residue"] = Pi_atom_to_res
 
-    # ---------- Residue to SSE ----------
-    Pi_res_to_sse = build_residue_to_sse_assignment(structure)
+    Pi_res_to_sse, sse_label = build_residue_to_sse_assignment(process_data)
     partitions["residue_to_sse"] = Pi_res_to_sse
-    
-    # ---------- SSE to Protein ----------
+
     N_sse = Pi_res_to_sse.shape[1]
     Pi_sse_to_prot = csr_matrix(
         (
@@ -347,14 +256,9 @@ def extract_partition_matrices(
         ),
         shape=(N_sse, 1),
     )
-
     partitions["sse_to_protein"] = Pi_sse_to_prot
 
-    print("Extracted partition matrices:")
-    for name, Pi in partitions.items():
-        print(f"  {name}: shape {Pi.shape}")
-    
-    return structure, partitions
+    return partitions, sse_label
 
 if __name__ == "__main__":
     

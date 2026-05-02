@@ -4,6 +4,7 @@ tasks:
 
   FoldClassification:
     task_type: classification
+    task_level: graph
     num_classes: 1195
 
     splits:
@@ -19,11 +20,12 @@ tasks:
 
   ECReaction:
     task_type: classification
+    task_level: graph
     num_classes: 384
 
     splits:
       train: training.txt
-      val: validation.txt
+      val: testing.txt
       test: testing.txt
 
     processed_dir: processed
@@ -31,6 +33,7 @@ tasks:
 
   GeneOntology:
     task_type: multilabel_classification
+    task_level: graph
     num_classes:
       MF: 489
       BP: 1943
@@ -38,20 +41,20 @@ tasks:
 
     splits:
       train: nrPDB-GO_train.txt
-      val: nrPDB-GO_valid.txt
+      val: nrPDB-GO_test.txt
       test: nrPDB-GO_test.txt
 
     processed_dir: processed
     graph_dir: graphs
 
-  AntibodyDevelopability:
-    task_type: classification
-    num_classes: 2
+  BindingSite:
+    task_type: node_classification
+    task_level: node
+    num_classes: 1  # binary per residue, single logit
 
     splits:
-      train: train.txt
-      val: valid.txt
-      test: test.txt
-      
+      train: training.txt
+      val: testing.txt
+
     processed_dir: processed
     graph_dir: graphs

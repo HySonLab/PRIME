@@ -5,7 +5,8 @@ from glob import glob
 from tqdm import tqdm
 
 import trimesh
-from partition import mesh_simplification_quadric_decimation
+from utils.partition import mesh_simplification_quadric_decimation
+import subprocess
 
 MAX_FACES = 1024
 
@@ -16,16 +17,37 @@ def export_surface(
     solvent_radius=1.4,
     selection="all",
 ):
-    cmd.load(pdb_path, "prot")
+    script = (
+        "import pymol\n"
+        "pymol.finish_launching(['pymol', '-qc'])\n"
+        "from pymol import cmd\n"
+        f"cmd.load('{pdb_path}', 'prot')\n"
+        f"cmd.hide('everything', '{selection}')\n"
+        f"cmd.show('surface', '{selection}')\n"
+        f"cmd.set('surface_quality', {surface_quality})\n"
+        f"cmd.set('solvent_radius', {solvent_radius})\n"
+        f"cmd.save('{output_path}', '{selection}')\n"
+        "cmd.delete('all')\n"
+    )
 
-    cmd.hide("everything", selection)
-    cmd.show("surface", selection)
+    script_path = output_path.replace(".obj", "_pymol_script.py")
+    with open(script_path, "w") as f:
+        f.write(script)
 
-    cmd.set("surface_quality", surface_quality)
-    cmd.set("solvent_radius", solvent_radius)
-
-    cmd.save(output_path, selection)
-    cmd.delete("all")
+    try:
+        result = subprocess.run(
+            ["python", script_path],
+            timeout=60,
+            capture_output=True,
+            text=True
+        )
+        if result.returncode != 0:
+            raise ValueError(f"PyMol failed: {result.stderr}")
+        if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+            raise ValueError(f"Surface file empty or missing: {output_path}")
+    finally:
+        if os.path.exists(script_path):
+            os.remove(script_path)
 
 def main():
     parser = argparse.ArgumentParser(

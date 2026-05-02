@@ -18,85 +18,13 @@ from tqdm import tqdm
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 from utils.hierarchical_graph import build_surface_graph
-from utils.utils import add_noise
+from utils.helpers import add_noise
 
-class SurfaceDataset(Dataset):
-
-    def __init__(self, surface_dir, max_faces=None):
-
-        all_files = sorted(
-            glob(os.path.join(surface_dir, "*.ply")) +
-            glob(os.path.join(surface_dir, "*.obj")) +
-            glob(os.path.join(surface_dir, "*.off"))
-        )
-
-        self.surface_files = all_files
-        
-        self.max_faces = max_faces
-
-        print(f"Using {len(self.surface_files)} surface meshes")
-
-    def __len__(self):
-        return len(self.surface_files)
-
-    def __getitem__(self, idx):
-
-        mesh = trimesh.load(self.surface_files[idx], process=False)
-
-        if self.max_faces is not None:
-            if mesh.faces.shape[0] > self.max_faces:
-                mesh = mesh_simplification_quadric_decimation(
-                    mesh,
-                    target_faces=self.max_faces
-                )
-
-        # Build graph on CPU
-        x, edge_index, face_index, edge_attr = build_surface_graph(
-            mesh,
-            device="cpu"
-        )
-
-        n_nodes = x.size(0)
-
-        h = torch.ones(n_nodes, 16)  # or pass input_dim
-
-        return h, x, edge_index, face_index, edge_attr
-
-def collate_surface_graphs(batch):
-
-    h_list = []
-    x_list = []
-    edge_index_list = []
-    face_index_list = []
-    edge_attr_list = []
-
-    node_offset = 0
-
-    for h, x, edge_index, face_index, edge_attr in batch:
-
-        h_list.append(h)
-        x_list.append(x)
-
-        edge_index = edge_index + node_offset
-        edge_index_list.append(edge_index)
-
-        face_index = face_index + node_offset
-        face_index_list.append(face_index)
-
-        edge_attr_list.append(edge_attr)
-
-        node_offset += h.size(0)
-
-    h = torch.cat(h_list, dim=0)
-    x = torch.cat(x_list, dim=0)
-    edge_index = torch.cat(edge_index_list, dim=1)
-    face_index = torch.cat(face_index_list, dim=1)
-    edge_attr = torch.cat(edge_attr_list, dim=0)
-
-    return h, x, edge_index, face_index, edge_attr
+from utils.dataset import SurfaceDataset, collate_surface_graphs
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
 # ============================================================
 # Train
@@ -120,30 +48,40 @@ def train_epoch(model, loader, optimizer, device):
             edge_attr = edge_attr.to(device)
 
         # ----------------------------
-        # Add noise (with normalization + schedule)
+        # Add noise
         # ----------------------------
-        x_noisy, x_target = add_noise(x)
+        x_noisy, x_clean, noise_std = add_noise(x)
+        noise_std = float(noise_std)
+
+        target = x_clean - x_noisy
 
         # ----------------------------
         # Forward
         # ----------------------------
-        x_recon = model(
-            h,
-            x_noisy,
-            edge_index,
-            face_index,
-            edge_attr
+        pred_noise = model(
+            h, x_noisy, edge_index, face_index, edge_attr
         )
 
         # ----------------------------
-        # Loss (reconstruct normalized coords)
+        # Denoising MSE loss
         # ----------------------------
-        loss = F.mse_loss(x_recon, x_target)
+        loss = ((pred_noise - target) ** 2).mean(dim=-1)
+        loss = loss.mean()
 
+        # ----------------------------
+        # Smoothness regularization
+        # ----------------------------
+        row, col = edge_index
+        smooth_loss = ((pred_noise[row] - pred_noise[col]) ** 2).mean()
+
+        loss = loss + 0.01 * smooth_loss
+
+        # ----------------------------
+        # Backprop
+        # ----------------------------
         optimizer.zero_grad()
         loss.backward()
 
-        # Optional: stabilize training
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
         optimizer.step()
@@ -176,14 +114,17 @@ def evaluate_epoch(model, loader, device):
                 edge_attr = edge_attr.to(device)
 
             # ----------------------------
-            # Add noise (same as training)
+            # Add noise
             # ----------------------------
-            x_noisy, x_target, noise_std = add_noise(x)
+            x_noisy, x_clean, noise_std = add_noise(x)
+            noise_std = float(noise_std)
+
+            target = x_clean - x_noisy
 
             # ----------------------------
             # Forward
             # ----------------------------
-            x_recon = model(
+            pred_noise = model(
                 h,
                 x_noisy,
                 edge_index,
@@ -192,13 +133,18 @@ def evaluate_epoch(model, loader, device):
             )
 
             # ----------------------------
-            # Loss
+            # Denoising MSE loss
             # ----------------------------
-            loss = F.mse_loss(x_recon, x_target)
+            loss = ((pred_noise - target) ** 2).mean(dim=-1)
+            loss = loss.mean()
 
             total_loss += loss.item()
 
     return total_loss / len(loader)
+
+# ============================================================
+# Train entry point
+# ============================================================
 
 def train(config):
 
@@ -217,7 +163,7 @@ def train(config):
     )
 
     dataset_size = len(dataset)
-    train_size = int(0.8 * dataset_size)
+    train_size = int(0.9 * dataset_size)
     val_size = dataset_size - train_size
 
     generator = torch.Generator().manual_seed(42)
@@ -254,6 +200,7 @@ def train(config):
     ).to(device)
 
     optimizer = Adam(model.parameters(), lr=surface_cfg["lr"])
+    scheduler = CosineAnnealingLR(optimizer, T_max=surface_cfg["epochs"], eta_min=1e-5)
 
     # --------------------------------------------------------
     # Logging
@@ -275,11 +222,13 @@ def train(config):
 
         train_loss = train_epoch(model, train_loader, optimizer, device)
         val_loss = evaluate_epoch(model, val_loader, device)
+        scheduler.step()
 
         log_str = (
             f"Epoch {epoch:03d}\n"
             f"Train Loss: {train_loss:.6f}\n"
             f"Val   Loss: {val_loss:.6f}\n"
+            f"LR:         {scheduler.get_last_lr()[0]:.2e}\n"
             f"----------------------------------------\n"
         )
 
@@ -289,7 +238,7 @@ def train(config):
             f.write(log_str)
 
         # --------------------------------------------------------
-        # Save best model (based on reconstruction loss)
+        # Save best model (based on val loss)
         # --------------------------------------------------------
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -316,4 +265,3 @@ if __name__ == "__main__":
         config = yaml.safe_load(f)
 
     train(config)
-
