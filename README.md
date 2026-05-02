@@ -57,3 +57,7 @@ bash test_prime.sh
 ## Configuration
 
 All model and training hyperparameters are managed through the configuration files in the `config/` directory. Please review and update the relevant config file before running any scripts.
+
+## License
+
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
