@@ -14,15 +14,15 @@ TASK="BindingSite"
 CUDA_DEVICE=1
 
 # ---- Base directories ----
-BASE_DIR="/home/dvnguye2/PRL/data/downstream_task_data"
+BASE_DIR="./data/downstream_task_data"
 
 # ---- Auto paths ----
 PT_DIR="${BASE_DIR}/${TASK}/processed"
 OUTPUT_DIR="${BASE_DIR}/${TASK}/graphs"
 
 # ---- Pretrained encoder paths (OPTIONAL) ----
-ATOM_ENCODER_PATH="/home/dvnguye2/PRL/ckpts/atom_egnn_encoder.pt"
-SURFACE_ENCODER_PATH="/home/dvnguye2/PRL/ckpts/surface_emnn_encoder.pt"
+ATOM_ENCODER_PATH="./ckpts/atom_egnn_encoder.pt"
+SURFACE_ENCODER_PATH="./ckpts/surface_emnn_encoder.pt"
 
 # If you want to disable, set to empty:
 # ATOM_ENCODER_PATH=""

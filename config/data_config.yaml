@@ -1,4 +1,4 @@
-data_root: /home/dvnguye2/PRL/data/downstream_task_data
+data_root: ./data/downstream_task_data
 
 tasks:
 
@@ -50,7 +50,7 @@ tasks:
   BindingSite:
     task_type: node_classification
     task_level: node
-    num_classes: 1  # binary per residue, single logit
+    num_classes: 1
 
     splits:
       train: training.txt

@@ -2,8 +2,8 @@
 # Data
 # =========================================
 data:
-  pdb_dir: /home/dvnguye2/PRL/data/pretrain_data/01-benchmark_pdbs
-  surface_dir: /home/dvnguye2/PRL/data/pretrain_data/01-benchmark_surfaces
+  pdb_dir: ./data/pretrain_data/01-benchmark_pdbs
+  surface_dir: ./data/pretrain_data/01-benchmark_surfaces
   batch_size: 32
 
 # =========================================
@@ -17,8 +17,8 @@ atom:
   n_layers: 3
   lr: 0.001
   epochs: 50
-  save_path: /home/dvnguye2/PRL/ckpts/atom_egnn_encoder.pt
-  log_path: /home/dvnguye2/PRL/logs/training_log_atom_encoder.txt
+  save_path: ./ckpts/atom_egnn_encoder.pt
+  log_path: ./logs/training_log_atom_encoder.txt
 
 # =========================================
 # Surface Encoder
@@ -31,8 +31,8 @@ surface:
   lr: 0.001
   max_faces: 1024
   epochs: 50
-  save_path: /home/dvnguye2/PRL/ckpts/surface_emnn_encoder.pt
-  log_path: /home/dvnguye2/PRL/logs/training_log_surface_encoder.txt
+  save_path: ./ckpts/surface_emnn_encoder.pt
+  log_path: ./logs/training_log_surface_encoder.txt
 
 # =========================================
 # Hierarchical GNN
@@ -43,11 +43,11 @@ hierarchical:
   n_layers: 3
   dropout: 0.3
   input_dims:
-    surface: 130    # encoder output
-    atom: 128       # encoder output
-    residue: 23     # one-hot + angles
-    sse: 4          # now one-hot type (3) + length (1)
-    protein: 1280   # ESM-2 CLS token
+    surface: 130    
+    atom: 128       
+    residue: 23     
+    sse: 4          
+    protein: 1280
   
 # =========================================
 # Output Heads

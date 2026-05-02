@@ -7,8 +7,8 @@
 # -----------------------------
 # Config
 # -----------------------------
-DATA_CONFIG="/home/dvnguye2/PRL/config/data_config.yaml"
-MODEL_CONFIG="/home/dvnguye2/PRL/config/model_config.yaml"
+DATA_CONFIG="./config/data_config.yaml"
+MODEL_CONFIG="./config/model_config.yaml"
 
 TASK="BindingSite"   # FoldClassification | ECReaction | GeneOntology | BindingSite
 
@@ -41,8 +41,7 @@ CROSS_ATTENTION="false"  # true or false
 # Resume Option
 # Set to checkpoint path to resume, or empty to train from scratch
 # -----------------------------
-# RESUME=""
-RESUME="/home/dvnguye2/PRL/ckpts/best_prime_BindingSite_surface_atom_residue_sse_protein.pt"
+RESUME=""
 
 echo "===================================="
 echo "Training PRIME"

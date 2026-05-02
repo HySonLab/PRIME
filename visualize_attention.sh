@@ -7,8 +7,8 @@
 # -----------------------------
 # Config
 # -----------------------------
-DATA_CONFIG="/home/dvnguye2/PRL/config/data_config.yaml"
-MODEL_CONFIG="/home/dvnguye2/PRL/config/model_config.yaml"
+DATA_CONFIG="./config/data_config.yaml"
+MODEL_CONFIG="./config/model_config.yaml"
 
 # -----------------------------
 # GPU Selection
@@ -19,7 +19,7 @@ CUDA_DEVICE=0
 # Settings
 # -----------------------------
 BATCH_SIZE=32
-OUTPUT_DIR="/home/dvnguye2/PRL/plots"
+OUTPUT_DIR="./plots"
 
 # -----------------------------
 # Task settings

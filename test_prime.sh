@@ -7,8 +7,8 @@
 # -----------------------------
 # Config
 # -----------------------------
-DATA_CONFIG="/home/dvnguye2/PRL/config/data_config.yaml"
-MODEL_CONFIG="/home/dvnguye2/PRL/config/model_config.yaml"
+DATA_CONFIG="./config/data_config.yaml"
+MODEL_CONFIG="./config/model_config.yaml"
 
 TASK="GeneOntology"   # FoldClassification | ECReaction | GeneOntology | BindingSite
 BATCH_SIZE=32
