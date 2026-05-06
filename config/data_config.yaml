@@ -41,7 +41,7 @@ tasks:
 
     splits:
       train: nrPDB-GO_train.txt
-      val: nrPDB-GO_test.txt
+      val: nrPDB-GO_valid.txt
       test: nrPDB-GO_test.txt
 
     processed_dir: processed
