@@ -10,16 +10,16 @@
 DATA_CONFIG="./config/data_config.yaml"
 MODEL_CONFIG="./config/model_config.yaml"
 
-TASK="BindingSite"   # FoldClassification | ECReaction | GeneOntology | BindingSite
+TASK="GeneOntology"   # FoldClassification | ECReaction | GeneOntology | BindingSite
 
 BATCH_SIZE=32
-EPOCHS=200
-LR=1e-4
+EPOCHS=100
+LR=1e-3
 
 # -----------------------------
 # GPU Selection
 # -----------------------------
-DEVICE_ID=3
+DEVICE_ID=1
 
 # -----------------------------
 # Optional (for GeneOntology)
@@ -35,7 +35,7 @@ READOUT_LEVEL="residue"
 # -----------------------------
 # Cross-Attention Option
 # -----------------------------
-CROSS_ATTENTION="false"  # true or false
+CROSS_ATTENTION="true"  # true or false
 
 # -----------------------------
 # Resume Option
