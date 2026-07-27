@@ -94,22 +94,6 @@ All model and training hyperparameters are managed through the configuration fil
 
 > **Important:** Update the `data_root` field in `config/data_config.yaml` to point to your local data directory before running any scripts.
 
-## Citation
-
-If our work is useful, please cite our paper:
-
-```bibtex
-@misc{nguyen2026primeproteinrepresentationphysicsinformed,
-      title={PRIME: Protein Representation via Physics-Informed Multiscale Equivariant Hierarchies}, 
-      author={Viet Thanh Duy Nguyen and John K. Johnstone and Truong-Son Hy},
-      year={2026},
-      eprint={2605.01625},
-      archivePrefix={arXiv},
-      primaryClass={cs.LG},
-      url={https://arxiv.org/abs/2605.01625}, 
-}
-```
-
 ## License
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
