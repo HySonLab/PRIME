@@ -80,6 +80,7 @@ if __name__ == "__main__":
     parser.add_argument("--go_branch",      type=str, default=None)
     parser.add_argument("--test_set_split", type=str, default=None)
     parser.add_argument("--batch_size",     type=int, default=4)
+    parser.add_argument("--seed", type=int, default=42)
 
     parser.add_argument(
         "--active_levels",
@@ -126,13 +127,14 @@ if __name__ == "__main__":
     # --------------------------------------------------
     # Checkpoint path — matches training naming
     # --------------------------------------------------
-    level_tag  = "_".join(args.active_levels)
-    model_tag  = "prime_ca" if args.cross_attention else "prime"
+    level_tag = "_".join(args.active_levels)
+    model_tag = "prime_ca" if args.cross_attention else "prime"
+    seed_tag  = f"seed{args.seed}"
 
     if args.task == "GeneOntology":
-        ckpt_path = f"/home/dvnguye2/PRL/ckpts/best_{model_tag}_{args.task}_{args.go_branch}_{level_tag}_epoch100.pt"
+        ckpt_path = f"./ckpts/best_{model_tag}_{args.task}_{args.go_branch}_{level_tag}_{seed_tag}.pt"
     else:
-        ckpt_path = f"/home/dvnguye2/PRL/ckpts/best_{model_tag}_{args.task}_{level_tag}.pt"
+        ckpt_path = f"./ckpts/best_{model_tag}_{args.task}_{level_tag}_{seed_tag}.pt"
 
     print("=" * 50)
     print(f"Task:            {args.task}")

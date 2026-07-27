@@ -392,23 +392,3 @@ def collate_surface_graphs(batch):
     edge_attr = torch.cat(edge_attr_list, dim=0)
 
     return h, x, edge_index, face_index, edge_attr
-
-if __name__ == "__main__":
-    
-    # Example usage
-    config_path = "/home/dvnguye2/PRL/config/data_config.yaml"
-    # task_name = "GeneOntology"
-    task_name = "FoldClassification"
-    # task_name = "ECReaction"
-    # task_name = "AntibodyDevelopability"
-    split = "train"
-    fold_test_type = None
-    
-    dataset = GraphDataset(
-        config_path=config_path,
-        task_name=task_name,
-        split=split,
-        fold_test_type=fold_test_type,
-    )
-
-    print("Dataset size:", len(dataset))

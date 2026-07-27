@@ -16,7 +16,7 @@ import yaml
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from utils.partition import extract_partition_matrices, mesh_simplification_quadric_decimation
+from utils.partition import extract_partition_matrices, mesh_simplification_quadric_decimation, get_atom_coords
 from utils.export_surface import export_surface
 from models.egnn import EGNN
 from models.emnn import EMNN
@@ -348,7 +348,7 @@ def coarsen_adjacency(
     normalize: bool = False
 ) -> csr_matrix:
     A_coarse = Pi.T @ A_fine @ Pi
-
+    
     if normalize:
         sizes = np.array(Pi.sum(axis=0)).flatten()
         inv = np.reciprocal(sizes, where=sizes > 0)
@@ -356,6 +356,23 @@ def coarsen_adjacency(
         A_coarse = D @ A_coarse @ D
 
     return A_coarse
+
+def build_knn_adjacency(coords: np.ndarray, k: int = 8) -> csr_matrix:
+    """
+    Build binary kNN adjacency from 3D coordinates.
+    """
+    N          = len(coords)
+    coords_t   = torch.tensor(coords, dtype=torch.float32)
+    edge_index = knn_graph(coords_t, k=k, loop=False)
+
+    row  = edge_index[0].numpy()
+    col  = edge_index[1].numpy()
+    data = np.ones(len(row), dtype=np.float32)
+
+    A = csr_matrix((data, (row, col)), shape=(N, N))
+    A = A + A.T
+    A.data[:] = 1.0
+    return A
 
 def build_surface_knn_adjacency(
     face_centroids: np.ndarray,
@@ -747,32 +764,44 @@ class ProteinGraphLevel:
     X: np.ndarray              # numpy features
 
     def to_torch(self, device):
-        """
-        Convert adjacency and features to torch tensors.
-        """
+        if isinstance(self.A, list):
+            # ✅ convert each adjacency separately
+            converted = []
+            for A_i in self.A:
+                A_coo = A_i.tocoo()
+                indices = torch.stack([
+                    torch.from_numpy(A_coo.row),
+                    torch.from_numpy(A_coo.col)
+                ]).long()
+                values = torch.from_numpy(A_coo.data).float()
+                converted.append(
+                    torch.sparse_coo_tensor(
+                        indices, values,
+                        size=A_coo.shape,
+                        device=device
+                    ).coalesce()
+                )
+            self.A = converted
+        else:
+            A = self.A.tocoo()
+            indices = torch.stack([
+                torch.from_numpy(A.row),
+                torch.from_numpy(A.col)
+            ]).long()
+            values = torch.from_numpy(A.data).float()
+            self.A = torch.sparse_coo_tensor(
+                indices, values,
+                size=A.shape,
+                device=device
+            ).coalesce()
 
-        # Convert adjacency once
-        A = self.A.tocoo()
-        indices = torch.stack([
-            torch.from_numpy(A.row),
-            torch.from_numpy(A.col)
-        ]).long()
-
-        values = torch.from_numpy(A.data).float()
-
-        self.A = torch.sparse_coo_tensor(
-            indices,
-            values,
-            size=A.shape,
-            device=device
-        ).coalesce()
-        
         if self.X is not None:
             self.X = self.X.to(device)
 
     @property
     def num_nodes(self):
-        return self.A.shape[0]
+        A = self.A[0] if isinstance(self.A, list) else self.A
+        return A.shape[0]
 
 class HierarchicalProteinGraph:
     """
@@ -892,25 +921,37 @@ def build_hierarchical_protein_graph(
     surface_level = ProteinGraphLevel("surface", A_surface, X_surface)
 
     # ==================================================
-    # Atom Level — from .pt
+    # Atom Level
     # ==================================================
     Pi_sa      = partitions["surface_to_atom"]
     A_atom_raw = coarsen_adjacency(A_surface, Pi_sa)
-    A_atom     = normalize_adjacency(A_atom_raw)
+    A_atom_knn = build_knn_adjacency(get_atom_coords(process_data), k=8)
 
     X_atom     = get_atom_features(process_data, encoder=atom_encoder, device=device)
     X_atom     = torch.tensor(X_atom, dtype=torch.float32)
-    atom_level = ProteinGraphLevel("atom", A_atom, X_atom)
+    atom_level = ProteinGraphLevel(
+        "atom",
+        A=[normalize_adjacency(A_atom_raw),
+           normalize_adjacency(A_atom_knn)],
+        X=X_atom
+    )
 
     # ==================================================
-    # Residue Level — from .pt
+    # Residue Level
     # ==================================================
     Pi_ar     = partitions["atom_to_residue"]
     A_res_raw = coarsen_adjacency(A_atom_raw, Pi_ar)
-    A_res     = normalize_adjacency(A_res_raw)
+    A_res_knn = build_knn_adjacency(
+        process_data.coords.numpy()[:, 1, :], k=10   # CA coords
+    )
 
     X_res         = get_residue_features(process_data)
-    residue_level = ProteinGraphLevel("residue", A_res, X_res)
+    residue_level = ProteinGraphLevel(
+        "residue",
+        A=[normalize_adjacency(A_res_raw), 
+           normalize_adjacency(A_res_knn)],
+        X=X_res
+    )
 
     # ==================================================
     # SSE Level

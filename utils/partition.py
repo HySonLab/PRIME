@@ -74,8 +74,7 @@ def mesh_simplification_quadric_decimation(mesh, target_faces):
 
 def print_structure_info(
     structure: Structure,
-    include_hetero: bool = False
-):
+    include_hetero: bool = False):
     """
     Print basic information about the PDB structure.
 
@@ -197,13 +196,18 @@ def build_residue_to_sse_assignment(process_data):
 
     return Pi, labels.tolist()
 
-def build_surface_to_atom_assignment(process_data, surface_path):
+def get_atom_coords(process_data):
     """
-    Build surface face -> atom assignment using atom coords from .pt data.
+    Extract valid heavy atom coordinates from processed .pt data.
+    Filters out padding atoms and hydrogen.
+    Used for both partition building and adjacency augmentation.
+    
+    Returns:
+        atom_coords: np.ndarray (N_atoms, 3)
     """
     coords_np   = process_data.coords.numpy()  # (N_res, 37, 3)
-
     atom_coords = []
+
     for res_idx in range(coords_np.shape[0]):
         for atom_idx in range(coords_np.shape[1]):
             x, y, z = coords_np[res_idx, atom_idx]
@@ -214,7 +218,14 @@ def build_surface_to_atom_assignment(process_data, surface_path):
                 continue
             atom_coords.append([x, y, z])
 
-    atom_coords = np.array(atom_coords, dtype=np.float32)
+    return np.array(atom_coords, dtype=np.float32)
+
+def build_surface_to_atom_assignment(process_data, surface_path):
+    """
+    Build surface face -> atom assignment using atom coords from .pt data.
+    """
+    
+    atom_coords = get_atom_coords(process_data)
 
     mesh           = trimesh.load(surface_path)
     mesh           = mesh_simplification_quadric_decimation(mesh, target_faces=MAX_FACES)
@@ -235,8 +246,7 @@ def build_surface_to_atom_assignment(process_data, surface_path):
 
 def extract_partition_matrices(
     surface_path: str,
-    process_data,
-):
+    process_data,):
     partitions = {}
 
     Pi_surface_to_atom = build_surface_to_atom_assignment(process_data, surface_path)
@@ -259,18 +269,3 @@ def extract_partition_matrices(
     partitions["sse_to_protein"] = Pi_sse_to_prot
 
     return partitions, sse_label
-
-if __name__ == "__main__":
-    
-    parser = argparse.ArgumentParser(
-        description="Hierarchical protein partition builder"
-    )
-    parser.add_argument(
-        "--pdb_path",
-        type=str,
-        help="Path to input PDB file"
-    )
-    
-    args = parser.parse_args()
-    
-    structure, partitions = extract_partition_matrices(pdb_path=args.pdb_path)

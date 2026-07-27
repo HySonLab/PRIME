@@ -5,28 +5,28 @@
 # ==========================================
 
 # ---- CHANGE ONLY THIS ----
-# TASK="FoldClassification"
+TASK="FoldClassification"
 # TASK="ECReaction"
 # TASK="GeneOntology"
-TASK="BindingSite"
+# TASK="BindingSite"
 
 # ---- GPU device ----
-CUDA_DEVICE=1
+CUDA_DEVICE=0
 
 # ---- Base directories ----
 BASE_DIR="./data/downstream_task_data"
 
 # ---- Auto paths ----
 PT_DIR="${BASE_DIR}/${TASK}/processed"
-OUTPUT_DIR="${BASE_DIR}/${TASK}/graphs"
+OUTPUT_DIR="${BASE_DIR}/${TASK}/graphs_no_pretrain"
 
 # ---- Pretrained encoder paths (OPTIONAL) ----
-ATOM_ENCODER_PATH="./ckpts/atom_egnn_encoder.pt"
-SURFACE_ENCODER_PATH="./ckpts/surface_emnn_encoder.pt"
+# ATOM_ENCODER_PATH="./ckpts/atom_egnn_encoder.pt"
+# SURFACE_ENCODER_PATH="./ckpts/surface_emnn_encoder.pt"
 
 # If you want to disable, set to empty:
-# ATOM_ENCODER_PATH=""
-# SURFACE_ENCODER_PATH=""
+ATOM_ENCODER_PATH=""
+SURFACE_ENCODER_PATH=""
 
 # ---- Create output directory ----
 mkdir -p "$OUTPUT_DIR"

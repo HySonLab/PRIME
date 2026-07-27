@@ -20,3 +20,6 @@ tmp/
 # Ignore plots
 plots/
 
+# PLM cache
+plm_cache/
+

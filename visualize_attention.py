@@ -305,7 +305,7 @@ if __name__ == "__main__":
         nargs="+",
         default=["surface", "atom", "residue", "sse", "protein"]
     )
-    parser.add_argument("--output_dir", type=str, default="/home/dvnguye2/PRL/plots")
+    parser.add_argument("--output_dir", type=str, default="./plots")
 
     args   = parser.parse_args()
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
@@ -345,9 +345,9 @@ if __name__ == "__main__":
     level_tag = "_".join(args.active_levels)
 
     if TASK == "GeneOntology":
-        ckpt_path = f"/home/dvnguye2/PRL/ckpts/best_prime_ca_{TASK}_{args.go_branch}_{level_tag}.pt"
+        ckpt_path = f"./ckpts/best_prime_ca_{TASK}_{args.go_branch}_{level_tag}.pt"
     else:
-        ckpt_path = f"/home/dvnguye2/PRL/ckpts/best_prime_ca_{TASK}_{level_tag}.pt"
+        ckpt_path = f"./ckpts/best_prime_ca_{TASK}_{level_tag}.pt"
 
     print(f"Loading checkpoint: {ckpt_path}")
 
@@ -400,43 +400,43 @@ if __name__ == "__main__":
             go_branch=args.go_branch,     # pass go_branch
         )
 
-        # # evaluate
-        # metric = get_metric(task_type, num_classes, device)
-        # metric.reset()
+        # evaluate
+        metric = get_metric(task_type, num_classes, device)
+        metric.reset()
 
-        # with torch.no_grad():
-        #     for batch in tqdm(test_loader, desc=f"Evaluating {split_tag}"):
-        #         for sample in batch:
-        #             logits, _ = model(sample["graph"], return_attn=True)
-        #             logits     = logits.squeeze(0)
+        with torch.no_grad():
+            for batch in tqdm(test_loader, desc=f"Evaluating {split_tag}"):
+                for sample in batch:
+                    logits, _ = model(sample["graph"], return_attn=True)
+                    logits     = logits.squeeze(0)
 
-        #             if task_type == "node_classification":
-        #                 labels = sample["label"].float().to(device)
-        #                 probs  = torch.sigmoid(logits).cpu()
-        #                 metric.update(probs, labels.long().cpu())
+                    if task_type == "node_classification":
+                        labels = sample["label"].float().to(device)
+                        probs  = torch.sigmoid(logits).cpu()
+                        metric.update(probs, labels.long().cpu())
 
-        #             elif task_type == "multilabel_classification":
-        #                 y = to_multihot(sample["label"], num_classes, device)
-        #                 metric.update(
-        #                     torch.sigmoid(logits).unsqueeze(0),
-        #                     y.int().unsqueeze(0)
-        #                 )
+                    elif task_type == "multilabel_classification":
+                        y = to_multihot(sample["label"], num_classes, device)
+                        metric.update(
+                            torch.sigmoid(logits).unsqueeze(0),
+                            y.int().unsqueeze(0)
+                        )
 
-        #             else:
-        #                 label = torch.tensor(
-        #                     sample["label"], dtype=torch.long, device=device
-        #                 )
-        #                 metric.update(logits.unsqueeze(0), label.unsqueeze(0))
+                    else:
+                        label = torch.tensor(
+                            sample["label"], dtype=torch.long, device=device
+                        )
+                        metric.update(logits.unsqueeze(0), label.unsqueeze(0))
 
-        # score = metric.compute().item()
+        score = metric.compute().item()
 
-        # metric_name = {
-        #     "multilabel_classification": "Fmax",
-        #     "node_classification":       "ROC-AUC",
-        #     "multiclass_classification": "Accuracy",
-        # }.get(task_type, "Score")
+        metric_name = {
+            "multilabel_classification": "Fmax",
+            "node_classification":       "ROC-AUC",
+            "multiclass_classification": "Accuracy",
+        }.get(task_type, "Score")
 
-        # print(f"{metric_name} ({split_tag}): {score:.4f}")
+        print(f"{metric_name} ({split_tag}): {score:.4f}")
 
         # collect attention weights
         weights_dict[split_tag] = collect_attention_weights(model, test_loader)

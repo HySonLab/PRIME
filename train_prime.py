@@ -4,6 +4,7 @@ from torch.optim.lr_scheduler import LinearLR
 from models.models import PRIME, PRIME_CrossAttention
 import argparse
 from tqdm import tqdm
+import random
 
 import sys
 import os
@@ -143,7 +144,7 @@ def train_prime(
     epochs=100,
     lr=1e-3,
     weight_decay=1e-4,
-    patience_es=10,
+    patience_es=20,
     factor=0.6,
     patience_lr=5,
     grad_clip=5.0,
@@ -232,7 +233,7 @@ def train_prime(
                     print("Early stopping triggered.")
                     break
 
-            if (epoch + 1) % 10 == 0:
+            if (epoch + 1) % 1 == 0:
                 ckpt_path = output_path.replace(".pt", f"_epoch{epoch+1}.pt")
                 torch.save(model.state_dict(), ckpt_path)
                 log_file.write(f"Checkpoint saved at epoch {epoch+1}.\n")
@@ -241,10 +242,18 @@ def train_prime(
         log_file.write(f"Best Val Metric: {best_val_metric:.6f}\n")
         log_file.write("Training Finished\n")
 
+def set_seed(seed):
+    """Set random seed for reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark     = False
+
+
 if __name__ == "__main__":
-
     parser = argparse.ArgumentParser()
-
     parser.add_argument("--data_config",  type=str, default="config/data_config.yaml")
     parser.add_argument("--model_config", type=str, default="config/model_config.yaml")
     parser.add_argument("--task",         type=str, default="FoldClassification")
@@ -256,7 +265,7 @@ if __name__ == "__main__":
     parser.add_argument("--go_branch",    type=str,   default=None)
     parser.add_argument("--pos_weight",   type=float, default=None)
     parser.add_argument("--resume",       type=str,   default=None)
-
+    parser.add_argument("--seed",         type=int,   default=42)
     parser.add_argument(
         "--active_levels",
         nargs="+",
@@ -268,8 +277,16 @@ if __name__ == "__main__":
         action="store_true",
         default=False,
     )
+    parser.add_argument(
+        "--direction",
+        type=str,
+        default="bidirectional",
+        choices=["bidirectional", "bottom_up_only", "top_down_only"],
+        help="Message passing direction (bidirectional=default, no suffix in ckpt name)"
+    )
 
     args   = parser.parse_args()
+    set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # --------------------------------------------------
@@ -321,10 +338,8 @@ if __name__ == "__main__":
             pw = torch.tensor([neg_count / (pos_count + 1e-6)], device=device)
             print(f"Estimated pos_weight: {pw.item():.2f}")
         criterion = nn.BCEWithLogitsLoss(pos_weight=pw)
-
     elif task_type == "multilabel_classification":
         criterion = nn.BCEWithLogitsLoss()
-
     else:
         criterion = nn.CrossEntropyLoss()
 
@@ -342,6 +357,7 @@ if __name__ == "__main__":
             head_layers=model_config["head"][args.task]["num_layers"],
             dropout=model_config["head"][args.task]["dropout"],
             task_level=task_level,
+            direction=args.direction,    # ✅
         ).to(device)
         print("Using PRIME_CrossAttention readout")
     else:
@@ -356,6 +372,7 @@ if __name__ == "__main__":
             head_layers=model_config["head"][args.task]["num_layers"],
             dropout=model_config["head"][args.task]["dropout"],
             task_level=task_level,
+            direction=args.direction,    # ✅
         ).to(device)
         print(f"Using PRIME with fixed readout: {args.readout_level}")
 
@@ -371,15 +388,17 @@ if __name__ == "__main__":
     # --------------------------------------------------
     # Output paths
     # --------------------------------------------------
-    level_tag = "_".join(args.active_levels)
-    model_tag = "prime_ca" if args.cross_attention else "prime"
+    level_tag     = "_".join(args.active_levels)
+    model_tag     = "prime_ca" if args.cross_attention else "prime"
+    seed_tag      = f"seed{args.seed}"
+    direction_tag = f"_{args.direction}" if args.direction != "bidirectional" else ""
 
     if args.task == "GeneOntology":
-        output_path = f"/home/dvnguye2/PRL/ckpts/best_{model_tag}_{args.task}_{args.go_branch}_{level_tag}.pt"
-        log_path    = f"/home/dvnguye2/PRL/logs/training_log_{model_tag}_{args.task}_{args.go_branch}_{level_tag}.txt"
+        output_path = f"./ckpts/best_{model_tag}_{args.task}_{args.go_branch}_{level_tag}{direction_tag}_{seed_tag}.pt"
+        log_path    = f"./logs/training_log_{model_tag}_{args.task}_{args.go_branch}_{level_tag}{direction_tag}_{seed_tag}.txt"
     else:
-        output_path = f"/home/dvnguye2/PRL/ckpts/best_{model_tag}_{args.task}_{level_tag}.pt"
-        log_path    = f"/home/dvnguye2/PRL/logs/training_log_{model_tag}_{args.task}_{level_tag}.txt"
+        output_path = f"./ckpts/best_{model_tag}_{args.task}_{level_tag}{direction_tag}_{seed_tag}_esm_split.pt"
+        log_path    = f"./logs/training_log_{model_tag}_{args.task}_{level_tag}{direction_tag}_{seed_tag}_esm_split.txt"
 
     # --------------------------------------------------
     # Print summary
@@ -392,7 +411,9 @@ if __name__ == "__main__":
     print(f"Task level:    {task_level}")
     print(f"Readout level: {args.readout_level}")
     print(f"Cross attn:    {args.cross_attention}")
+    print(f"Direction:     {args.direction}")    # ✅
     print(f"Resume:        {args.resume}")
+    print(f"Seed:          {args.seed}")
     print("=" * 40)
 
     # --------------------------------------------------

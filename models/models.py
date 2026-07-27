@@ -27,9 +27,9 @@ class PRIME(nn.Module):
         head_layers=3,
         dropout=0.3,
         task_level="graph",
+        direction="bidirectional",    # ✅
     ):
         super().__init__()
-
         self.readout_level = readout_level
         self.task_level    = task_level
 
@@ -37,9 +37,9 @@ class PRIME(nn.Module):
             input_dims=input_dims,
             active_levels=active_levels,
             hidden_dim=hidden_dim,
-            n_layers=encoder_layers
+            n_layers=encoder_layers,
+            direction=direction,       # ✅
         )
-
         self.head = MLP_Head(
             in_dim=hidden_dim,
             out_dim=num_classes,
@@ -117,7 +117,6 @@ class LevelAttentionReadout(nn.Module):
 class PRIME_CrossAttention(nn.Module):
     """
     PRIME variant with adaptive multiscale readout via cross-attention.
-    Replaces fixed readout level with learned level-attention mechanism.
     """
     def __init__(
         self,
@@ -130,9 +129,9 @@ class PRIME_CrossAttention(nn.Module):
         head_layers=2,
         dropout=0.3,
         task_level="graph",
+        direction="bidirectional",    # ✅
     ):
         super().__init__()
-
         self.active_levels = active_levels
         self.task_level    = task_level
 
@@ -140,11 +139,10 @@ class PRIME_CrossAttention(nn.Module):
             input_dims=input_dims,
             active_levels=active_levels,
             hidden_dim=hidden_dim,
-            n_layers=encoder_layers
+            n_layers=encoder_layers,
+            direction=direction,       # ✅
         )
-
         self.readout = LevelAttentionReadout(hidden_dim, active_levels)
-
         self.head = MLP_Head(
             in_dim=hidden_dim,
             out_dim=num_classes,
@@ -155,22 +153,10 @@ class PRIME_CrossAttention(nn.Module):
         )
 
     def forward(self, graph, return_attn=False):
-        """
-        Args:
-            graph:       HierarchicalProteinGraph
-            return_attn: if True, also return attention weights for analysis
-
-        Returns:
-            logits:       (1, num_classes)
-            attn_weights: (1, L) — only if return_attn=True
-        """
-        H = self.encoder(graph)
-
-        embedding, attn_weights = self.readout(H)  # (1, hidden_dim), (1, L)
-
-        logits = self.head(embedding)              # (1, num_classes)
+        H                       = self.encoder(graph)
+        embedding, attn_weights = self.readout(H)
+        logits                  = self.head(embedding)
 
         if return_attn:
             return logits, attn_weights
-
         return logits

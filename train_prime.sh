@@ -10,21 +10,21 @@
 DATA_CONFIG="./config/data_config.yaml"
 MODEL_CONFIG="./config/model_config.yaml"
 
-TASK="GeneOntology"   # FoldClassification | ECReaction | GeneOntology | BindingSite
+TASK="FoldClassification"   # FoldClassification | ECReaction | GeneOntology | BindingSite
 
 BATCH_SIZE=32
-EPOCHS=100
+EPOCHS=200
 LR=1e-3
 
 # -----------------------------
 # GPU Selection
 # -----------------------------
-DEVICE_ID=1
+DEVICE_ID=0
 
 # -----------------------------
 # Optional (for GeneOntology)
 # -----------------------------
-GO_BRANCH="CC"   # MF | BP | CC
+GO_BRANCH="BP"   # MF | BP | CC
 
 # -----------------------------
 # Hierarchy Ablation
@@ -35,13 +35,23 @@ READOUT_LEVEL="residue"
 # -----------------------------
 # Cross-Attention Option
 # -----------------------------
-CROSS_ATTENTION="true"  # true or false
+CROSS_ATTENTION="false"   # true or false
+
+# -----------------------------
+# Direction — for ablation study
+# bidirectional | bottom_up_only | top_down_only
+# -----------------------------
+DIRECTION="bidirectional"
+
+# -----------------------------
+# Seed
+# -----------------------------
+SEED=1
 
 # -----------------------------
 # Resume Option
-# Set to checkpoint path to resume, or empty to train from scratch
 # -----------------------------
-RESUME=""
+RESUME="false"
 
 echo "===================================="
 echo "Training PRIME"
@@ -53,12 +63,11 @@ echo "GPU:             $DEVICE_ID"
 echo "Active Levels:   ${ACTIVE_LEVELS[@]}"
 echo "Readout Level:   $READOUT_LEVEL"
 echo "Cross Attention: $CROSS_ATTENTION"
-echo "Resume:          ${RESUME:-none}"
+echo "Direction:       $DIRECTION"
+echo "Seed:            $SEED"
+echo "Resume:          $RESUME"
 echo "===================================="
 
-# -----------------------------
-# Set CUDA visibility
-# -----------------------------
 export CUDA_VISIBLE_DEVICES=$DEVICE_ID
 
 # -----------------------------
@@ -72,23 +81,45 @@ CMD="python train_prime.py \
     --epochs $EPOCHS \
     --lr $LR \
     --active_levels ${ACTIVE_LEVELS[@]} \
-    --readout_level $READOUT_LEVEL"
+    --readout_level $READOUT_LEVEL \
+    --direction $DIRECTION \
+    --seed $SEED"
 
-# add cross_attention flag if enabled
 if [ "$CROSS_ATTENTION" == "true" ]; then
     CMD="$CMD --cross_attention"
 fi
 
-# add go_branch if GeneOntology
 if [ "$TASK" == "GeneOntology" ]; then
     echo "GO Branch: $GO_BRANCH"
     CMD="$CMD --go_branch $GO_BRANCH"
 fi
 
-# add resume if set
-if [ -n "$RESUME" ]; then
-    echo "Resuming from: $RESUME"
-    CMD="$CMD --resume \"$RESUME\""
+if [ "$RESUME" == "true" ]; then
+    LEVEL_TAG="${ACTIVE_LEVELS[*]}"
+    LEVEL_TAG="${LEVEL_TAG// /_}"
+    MODEL_TAG="prime"
+    if [ "$CROSS_ATTENTION" == "true" ]; then
+        MODEL_TAG="prime_ca"
+    fi
+
+    # add direction suffix only if not bidirectional
+    DIRECTION_TAG=""
+    if [ "$DIRECTION" != "bidirectional" ]; then
+        DIRECTION_TAG="_${DIRECTION}"
+    fi
+
+    if [ "$TASK" == "GeneOntology" ]; then
+        RESUME_PATH="./ckpts/best_${MODEL_TAG}_${TASK}_${GO_BRANCH}_${LEVEL_TAG}${DIRECTION_TAG}_seed${SEED}.pt"
+    else
+        RESUME_PATH="./ckpts/best_${MODEL_TAG}_${TASK}_${LEVEL_TAG}${DIRECTION_TAG}_seed${SEED}.pt"
+    fi
+
+    if [ -f "$RESUME_PATH" ]; then
+        echo "Resuming from: $RESUME_PATH"
+        CMD="$CMD --resume \"$RESUME_PATH\""
+    else
+        echo "Warning: checkpoint not found at $RESUME_PATH — training from scratch"
+    fi
 fi
 
 # -----------------------------

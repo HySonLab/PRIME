@@ -16,7 +16,13 @@ tasks:
         fold: test_fold.txt
 
     processed_dir: processed
-    graph_dir: graphs
+    
+    # WITH pretrained encoders
+    graph_dir: graphs_pretrain
+
+    # WITHOUT pretrained encoders
+    # graph_dir: graphs_no_pretrain
+  
 
   ECReaction:
     task_type: classification
@@ -41,7 +47,7 @@ tasks:
 
     splits:
       train: nrPDB-GO_train.txt
-      val: nrPDB-GO_valid.txt
+      val: nrPDB-GO_val.txt
       test: nrPDB-GO_test.txt
 
     processed_dir: processed

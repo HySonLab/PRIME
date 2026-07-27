@@ -255,7 +255,7 @@ def train(config):
     
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="/home/dvnguye2/PRL/config/model_config.yaml")
+    parser.add_argument("--config", type=str, default="./config/model_config.yaml")
     args = parser.parse_args()
 
     # --------------------------------------------
