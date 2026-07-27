@@ -357,7 +357,7 @@ if __name__ == "__main__":
             head_layers=model_config["head"][args.task]["num_layers"],
             dropout=model_config["head"][args.task]["dropout"],
             task_level=task_level,
-            direction=args.direction,    # ✅
+            direction=args.direction,
         ).to(device)
         print("Using PRIME_CrossAttention readout")
     else:
@@ -372,7 +372,7 @@ if __name__ == "__main__":
             head_layers=model_config["head"][args.task]["num_layers"],
             dropout=model_config["head"][args.task]["dropout"],
             task_level=task_level,
-            direction=args.direction,    # ✅
+            direction=args.direction,
         ).to(device)
         print(f"Using PRIME with fixed readout: {args.readout_level}")
 
@@ -411,7 +411,7 @@ if __name__ == "__main__":
     print(f"Task level:    {task_level}")
     print(f"Readout level: {args.readout_level}")
     print(f"Cross attn:    {args.cross_attention}")
-    print(f"Direction:     {args.direction}")    # ✅
+    print(f"Direction:     {args.direction}")
     print(f"Resume:        {args.resume}")
     print(f"Seed:          {args.seed}")
     print("=" * 40)
