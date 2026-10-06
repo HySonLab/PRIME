@@ -4,13 +4,12 @@ from models.models import PRIME, PRIME_CrossAttention
 import yaml
 import argparse
 from tqdm import tqdm
-
 import sys
 import os
+import time
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from utils.hierarchical_graph import *
 from utils.helpers import *
-
 
 def load_config(path):
     with open(path, "r") as f:
@@ -28,31 +27,43 @@ def test_model(
     model.eval()
     metric = get_metric(task_type, num_classes, device)
 
-    for batch in tqdm(loader, desc="Testing", leave=False):
+    # ── Timing & memory setup ──────────────────────────────
+    torch.cuda.reset_peak_memory_stats(device)
+    total_time = 0.0
+    total_proteins = 0
+    # ───────────────────────────────────────────────────────
 
-        # ==================================================
-        # Node-level task (e.g. BindingSite)
-        # ==================================================
+    for batch in tqdm(loader, desc="Testing", leave=False):
         if task_level == "node":
             for sample in batch:
                 graph  = sample["graph"]
                 labels = sample["label"].to(device)
 
+                # ── Measure ───────────────────────────────
+                torch.cuda.synchronize(device)
+                start = time.perf_counter()
                 logits = model(graph).squeeze(-1)
-                probs  = torch.sigmoid(logits).cpu()
-                metric.update(probs, labels.long().cpu())
+                torch.cuda.synchronize(device)
+                total_time += time.perf_counter() - start
+                total_proteins += 1
+                # ─────────────────────────────────────────
 
-        # ==================================================
-        # Graph-level task
-        # ==================================================
+                probs = torch.sigmoid(logits).cpu()
+                metric.update(probs, labels.long().cpu())
         else:
             logits_list = []
             labels_list = []
-
             for sample in batch:
+                # ── Measure ───────────────────────────────
+                torch.cuda.synchronize(device)
+                start = time.perf_counter()
                 logits = model(sample["graph"])
-                logits_list.append(logits.squeeze(0))
+                torch.cuda.synchronize(device)
+                total_time += time.perf_counter() - start
+                total_proteins += 1
+                # ─────────────────────────────────────────
 
+                logits_list.append(logits.squeeze(0))
                 if task_type == "multilabel_classification":
                     y = to_multihot(sample["label"], num_classes, device)
                     labels_list.append(y)
@@ -62,42 +73,44 @@ def test_model(
                             sample["label"], dtype=torch.long, device=device
                         )
                     )
-
             logits = torch.stack(logits_list, dim=0)
             labels = torch.stack(labels_list, dim=0)
-            
             metric.update(logits, labels)
+
+    # ── Report ────────────────────────────────────────────
+    avg_time_per_protein = total_time / total_proteins
+    peak_memory_gb = torch.cuda.max_memory_allocated(device) / 1024**3
+    print(f"\nInference time:  {avg_time_per_protein:.4f} s/protein")
+    print(f"Peak GPU memory: {peak_memory_gb:.2f} GB")
+    # ─────────────────────────────────────────────────────
 
     return metric.compute().item()
 
 if __name__ == "__main__":
-
     parser = argparse.ArgumentParser()
-
     parser.add_argument("--data_config",    type=str, default="config/data_config.yaml")
     parser.add_argument("--model_config",   type=str, default="config/model_config.yaml")
     parser.add_argument("--task",           type=str, default="FoldClassification")
     parser.add_argument("--go_branch",      type=str, default=None)
     parser.add_argument("--test_set_split", type=str, default=None)
     parser.add_argument("--batch_size",     type=int, default=4)
-    parser.add_argument("--seed", type=int, default=42)
-
+    parser.add_argument("--seed",           type=int, default=42)
     parser.add_argument(
         "--active_levels",
         nargs="+",
         default=["surface", "atom", "residue", "sse", "protein"]
     )
-    parser.add_argument(
-        "--readout_level",
-        type=str,
-        default="residue"
-    )
-
+    parser.add_argument("--readout_level",  type=str, default="residue")
     parser.add_argument(
         "--cross_attention",
         action="store_true",
         default=False,
-        help="Use PRIME_CrossAttention instead of standard PRIME"
+    )
+    parser.add_argument(
+        "--direction",
+        type=str,
+        default="bidirectional",
+        choices=["bidirectional", "bottom_up_only", "top_down_only"],
     )
 
     args   = parser.parse_args()
@@ -125,16 +138,17 @@ if __name__ == "__main__":
         num_classes = task_cfg["num_classes"]
 
     # --------------------------------------------------
-    # Checkpoint path — matches training naming
+    # Checkpoint path
     # --------------------------------------------------
-    level_tag = "_".join(args.active_levels)
-    model_tag = "prime_ca" if args.cross_attention else "prime"
-    seed_tag  = f"seed{args.seed}"
+    level_tag     = "_".join(args.active_levels)
+    model_tag     = "prime_ca" if args.cross_attention else "prime"
+    seed_tag      = f"seed{args.seed}"
+    direction_tag = f"_{args.direction}" if args.direction != "bidirectional" else ""
 
     if args.task == "GeneOntology":
-        ckpt_path = f"./ckpts/best_{model_tag}_{args.task}_{args.go_branch}_{level_tag}_{seed_tag}.pt"
+        ckpt_path = f"./ckpts/best_{model_tag}_{args.task}_{args.go_branch}_{level_tag}{direction_tag}_{seed_tag}.pt"
     else:
-        ckpt_path = f"./ckpts/best_{model_tag}_{args.task}_{level_tag}_{seed_tag}.pt"
+        ckpt_path = f"./ckpts/best_{model_tag}_{args.task}_{level_tag}{direction_tag}_{seed_tag}.pt"
 
     print("=" * 50)
     print(f"Task:            {args.task}")
@@ -143,6 +157,7 @@ if __name__ == "__main__":
     print(f"Active levels:   {args.active_levels}")
     print(f"Readout level:   {args.readout_level}")
     print(f"Cross attention: {args.cross_attention}")
+    print(f"Direction:       {args.direction}")
     print(f"Checkpoint:      {ckpt_path}")
     print("=" * 50)
 
@@ -173,6 +188,7 @@ if __name__ == "__main__":
             head_layers=model_config["head"][args.task]["num_layers"],
             dropout=model_config["head"][args.task]["dropout"],
             task_level=task_level,
+            direction=args.direction, 
         )
     else:
         model = PRIME(
@@ -186,6 +202,7 @@ if __name__ == "__main__":
             head_layers=model_config["head"][args.task]["num_layers"],
             dropout=model_config["head"][args.task]["dropout"],
             task_level=task_level,
+            direction=args.direction,
         )
 
     state_dict = torch.load(ckpt_path, map_location=device)

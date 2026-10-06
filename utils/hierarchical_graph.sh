@@ -18,7 +18,7 @@ BASE_DIR="./data/downstream_task_data"
 
 # ---- Auto paths ----
 PT_DIR="${BASE_DIR}/${TASK}/processed"
-OUTPUT_DIR="${BASE_DIR}/${TASK}/graphs_no_pretrain"
+OUTPUT_DIR="${BASE_DIR}/${TASK}/graphs"
 
 # ---- Pretrained encoder paths (OPTIONAL) ----
 # ATOM_ENCODER_PATH="./ckpts/atom_egnn_encoder.pt"

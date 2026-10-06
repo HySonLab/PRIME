@@ -7,7 +7,7 @@ SEED=1
 export CUDA_VISIBLE_DEVICES=$CUDA_DEVICE
 
 # for PLM in  esm2 esmc prott5 saprot; do
-for PLM in esmc; do
+for PLM in esm2; do
     echo "===================================="
     echo "PLM: $PLM | Seed: $SEED"
     echo "===================================="

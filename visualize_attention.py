@@ -1,468 +1,345 @@
+"""
+Collect PRIME_CrossAttention level-attention weights for all tasks and draw
+one combined violin figure for the paper.
+
+Panels (2x4 grid, last slot = legend):
+    (a) Fold - Family   (b) Fold - Superfamily   (c) Fold - Fold   (d) EC Reaction
+    (e) GO - MF         (f) GO - BP              (g) GO - CC
+
+Usage
+-----
+# evaluate every run, cache weights, then plot
+python visualize_attention.py
+
+# only re-draw the figure from cached .npy files (no GPU needed)
+python visualize_attention.py --plot_only
+
+# re-run just some panels (others are loaded from cache)
+python visualize_attention.py --runs GO_MF GO_BP --overwrite
+"""
+import os
+import sys
+import json
+import argparse
+
+import numpy as np
 import torch
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-import numpy as np
-import os
-import argparse
-import yaml
+from matplotlib.lines import Line2D
 from tqdm import tqdm
-from utils.hierarchical_graph import *
-from utils.helpers import *
 
-import sys
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models.models import PRIME_CrossAttention
+from utils.hierarchical_graph import *          # noqa: F401,F403
+from utils.helpers import *                     # noqa: F401,F403  (get_metric, to_multihot)
 from utils.helpers import load_config, build_graph_dataloaders
+from models.models import PRIME_CrossAttention
+
 
 # ============================================================
-# Collect attention weights from val set
+# Run definitions (order = panel order in the figure)
 # ============================================================
 
-def collect_attention_weights(model, loader):
-    """
-    Run model on loader and collect per-protein attention weights.
-    Returns: (N_proteins, L) numpy array
-    """
-    model.eval()
-    all_weights = []
+RUNS = {
+    "FOLD_family":      dict(task="FoldClassification", go_branch=None, split="family",      title="Fold — Family"),
+    "FOLD_superfamily": dict(task="FoldClassification", go_branch=None, split="superfamily", title="Fold — Superfamily"),
+    "FOLD_fold":        dict(task="FoldClassification", go_branch=None, split="fold",        title="Fold — Fold"),
+    "EC":               dict(task="ECReaction",         go_branch=None, split=None,          title="EC Reaction"),
+    "GO_MF":            dict(task="GeneOntology",       go_branch="MF", split=None,          title="GO — MF"),
+    "GO_BP":            dict(task="GeneOntology",       go_branch="BP", split=None,          title="GO — BP"),
+    "GO_CC":            dict(task="GeneOntology",       go_branch="CC", split=None,          title="GO — CC"),
+}
 
-    with torch.no_grad():
-        for batch in tqdm(loader, desc="Collecting attention"):
-            for sample in batch:
-                try:
-                    _, attn = model(sample["graph"], return_attn=True)  # (1, L)
-                    all_weights.append(attn.cpu().squeeze(0).numpy())   # (L,)
-                except Exception as e:
-                    continue
+METRIC_NAME = {
+    "multilabel_classification": "Fmax",
+    "node_classification":       "ROC-AUC",
+    "multiclass_classification": "Accuracy",
+}
 
-    return np.stack(all_weights, axis=0)  # (N, L)
+COLORS = ["#4C72B0", "#DD8452", "#55A868", "#C44E52", "#8172B2"]
+LEVEL_NAMES = {"surface": "Surface", "atom": "Atom", "residue": "Residue",
+               "sse": "SSE", "protein": "Protein"}
 
-# ============================================================
-# Plot 1 — Mean attention bar chart
-# ============================================================
 
-def plot_mean_attention(weights, levels, save_path, task_name):
-    mean_w = weights.mean(axis=0)
-    std_w  = weights.std(axis=0)
-    uniform = 1.0 / len(levels)
+def cache_file(cache_dir, run, level_tag):
+    """Same naming as before so old caches keep working."""
+    if run["task"] == "GeneOntology":
+        name = f"attn_GeneOntology_{run['go_branch']}_{level_tag}"
+    else:
+        name = f"attn_{run['task']}_{level_tag}"
+    if run["split"] is not None:
+        name += f"_{run['split']}"
+    return os.path.join(cache_dir, name + ".npy")
 
-    fig, ax = plt.subplots(figsize=(8, 5))
-
-    colors = ["#4C72B0", "#DD8452", "#55A868", "#C44E52", "#8172B2"]
-    bars   = ax.bar(
-        levels, mean_w,
-        yerr=std_w,
-        color=colors[:len(levels)],
-        capsize=6,
-        edgecolor="black",
-        linewidth=0.8,
-        width=0.6
-    )
-
-    ax.axhline(
-        uniform, color="gray", linestyle="--",
-        linewidth=1.5, label=f"Uniform ({uniform:.2f})"
-    )
-
-    # annotate values on bars
-    for bar, val in zip(bars, mean_w):
-        ax.text(
-            bar.get_x() + bar.get_width() / 2,
-            bar.get_height() + std_w[list(mean_w).index(val)] + 0.005,
-            f"{val:.3f}",
-            ha="center", va="bottom", fontsize=9, fontweight="bold"
-        )
-
-    ax.set_title(
-        f"Mean Attention Weight per Structural Level\n({task_name})",
-        fontsize=13, fontweight="bold", pad=12
-    )
-    ax.set_xlabel("Hierarchical Level", fontsize=11)
-    ax.set_ylabel("Attention Weight", fontsize=11)
-    ax.set_ylim(0, max(mean_w + std_w) * 1.25)
-    ax.legend(fontsize=10)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches="tight")
-    plt.close()
-    print(f"Saved: {save_path}")
 
 # ============================================================
-# Plot
+# Model loading
 # ============================================================
 
-def plot_combined_attention(weights_dict, levels, save_path, task_name="FoldClassification"):
-    """
-    weights_dict: {"family": np.array, "superfamily": np.array, "fold": np.array}
-    Produces a 2x3 figure: top row = bar charts, bottom row = violin plots
-    """
-    splits = ["family", "superfamily", "fold"]
-    colors  = ["#4C72B0", "#DD8452", "#55A868", "#C44E52", "#8172B2"]
-    uniform = 1.0 / len(levels)
+def get_num_classes(task, task_cfg, go_branch):
+    if task == "GeneOntology":
+        if go_branch is None:
+            raise ValueError("GeneOntology requires a go_branch (MF/BP/CC)")
+        return task_cfg["num_classes"][go_branch]
+    return task_cfg["num_classes"]
 
-    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
-    fig.suptitle(
-        f"Attention Weight Analysis — {task_name}",
-        fontsize=15, fontweight="bold", y=1.01
+
+def load_model(task, go_branch, task_cfg, model_config, active_levels, ckpt_dir, device):
+    level_tag   = "_".join(active_levels)
+    num_classes = get_num_classes(task, task_cfg, go_branch)
+
+    if task == "GeneOntology":
+        ckpt_path = os.path.join(ckpt_dir, f"best_prime_ca_{task}_{go_branch}_{level_tag}_seed3.pt")
+    else:
+        ckpt_path = os.path.join(ckpt_dir, f"best_prime_ca_{task}_{level_tag}_seed3.pt")
+    print(f"Loading checkpoint: {ckpt_path}")
+
+    head_cfg = model_config["head"][task]
+    model = PRIME_CrossAttention(
+        num_classes=num_classes,
+        input_dims=model_config["hierarchical"]["input_dims"],
+        active_levels=active_levels,
+        hidden_dim=model_config["hierarchical"]["hidden_dim"],
+        encoder_layers=model_config["hierarchical"]["n_layers"],
+        head_hidden_dim=head_cfg["hidden_dim"],
+        head_layers=head_cfg["num_layers"],
+        dropout=head_cfg["dropout"],
+        task_level=task_cfg.get("task_level", "graph"),
     )
+    model.load_state_dict(torch.load(ckpt_path, map_location=device))
+    return model.to(device).eval(), num_classes
 
-    for col, split in enumerate(splits):
-        weights = weights_dict[split]
-        mean_w  = weights.mean(axis=0)
-        std_w   = weights.std(axis=0)
 
-        # ── Top row: bar chart ──────────────────────────────────
-        ax = axes[0, col]
-        bars = ax.bar(
-            levels, mean_w,
-            yerr=std_w,
-            color=colors[:len(levels)],
-            capsize=5,
-            edgecolor="black",
-            linewidth=0.7,
-            width=0.6
-        )
-        ax.axhline(uniform, color="gray", linestyle="--", linewidth=1.2,
-                   label=f"Uniform ({uniform:.2f})")
+# ============================================================
+# Evaluate + collect attention in ONE pass
+# ============================================================
 
-        for bar, val, std in zip(bars, mean_w, std_w):
-            ax.text(
-                bar.get_x() + bar.get_width() / 2,
-                bar.get_height() + std + 0.005,
-                f"{val:.3f}",
-                ha="center", va="bottom", fontsize=8, fontweight="bold"
-            )
+@torch.no_grad()
+def evaluate_and_collect(model, loader, task_type, num_classes, n_levels, device, desc):
+    metric = get_metric(task_type, num_classes, device)
+    metric.reset()
+    attn_rows = []
+    n_fail = 0
 
-        ax.set_title(f"{split.capitalize()} Split", fontsize=12, fontweight="bold")
-        ax.set_ylim(0, max(mean_w + std_w) * 1.3)
-        ax.set_xlabel("Hierarchical Level", fontsize=10)
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-        if col == 0:
-            ax.set_ylabel("Attention Weight", fontsize=10)
-            ax.legend(fontsize=8)
-        else:
-            ax.set_ylabel("")
+    for batch in tqdm(loader, desc=desc):
+        for sample in batch:
+            try:
+                logits, attn = model(sample["graph"], return_attn=True)
+            except Exception as e:  # keep going, but report it
+                n_fail += 1
+                if n_fail <= 3:
+                    print(f"  [warn] forward failed: {e}")
+                continue
 
-        # ── Bottom row: violin plot ─────────────────────────────
-        ax = axes[1, col]
-        parts = ax.violinplot(
-            [weights[:, i] for i in range(len(levels))],
-            positions=range(len(levels)),
-            showmeans=True,
-            showmedians=True,
-            widths=0.6
-        )
-        for i, pc in enumerate(parts["bodies"]):
-            pc.set_facecolor(colors[i % len(colors)])
-            pc.set_alpha(0.7)
-        parts["cmeans"].set_color("black")
-        parts["cmedians"].set_color("red")
+            # (1, L) for graph-level tasks; (n_nodes, L) for node-level
+            attn_rows.append(attn.detach().float().cpu().numpy().reshape(-1, n_levels))
 
-        ax.axhline(uniform, color="gray", linestyle="--", linewidth=1.2)
-        ax.set_xticks(range(len(levels)))
-        ax.set_xticklabels(levels, fontsize=10)
-        ax.set_xlabel("Hierarchical Level", fontsize=10)
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-        if col == 0:
-            ax.set_ylabel("Attention Weight", fontsize=10)
-            # shared legend for violin only on first column
-            mean_patch   = mpatches.Patch(color="black", label="Mean")
-            median_patch = mpatches.Patch(color="red",   label="Median")
-            uniform_patch = mpatches.Patch(color="gray", label=f"Uniform ({uniform:.2f})")
-            ax.legend(handles=[mean_patch, median_patch, uniform_patch], fontsize=8)
-        else:
-            ax.set_ylabel("")
+            logits = logits.squeeze(0)
+            if task_type == "node_classification":
+                labels = sample["label"].float().to(device)
+                metric.update(torch.sigmoid(logits).cpu(), labels.long().cpu())
+            elif task_type == "multilabel_classification":
+                y = to_multihot(sample["label"], num_classes, device)
+                metric.update(torch.sigmoid(logits).unsqueeze(0), y.int().unsqueeze(0))
+            else:
+                label = torch.tensor(sample["label"], dtype=torch.long, device=device)
+                metric.update(logits.unsqueeze(0), label.unsqueeze(0))
 
-    # row labels on the left
-    axes[0, 0].annotate("Mean ± Std", xy=(-0.25, 0.5), xycoords="axes fraction",
-                         fontsize=11, fontweight="bold", rotation=90, va="center")
-    axes[1, 0].annotate("Distribution", xy=(-0.25, 0.5), xycoords="axes fraction",
-                         fontsize=11, fontweight="bold", rotation=90, va="center")
+    if n_fail:
+        print(f"  [warn] {n_fail} samples skipped")
 
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches="tight")
-    plt.close()
-    print(f"Saved: {save_path}")
+    score = metric.compute().item()
+    return score, np.concatenate(attn_rows, axis=0)
 
-def plot_single_task_attention(weights, levels, save_path, task_name):
-    """
-    Single figure with bar chart and violin plot side by side.
-    Used for non-FoldClassification tasks.
-    """
-    mean_w  = weights.mean(axis=0)
-    std_w   = weights.std(axis=0)
-    uniform = 1.0 / len(levels)
-    colors  = ["#4C72B0", "#DD8452", "#55A868", "#C44E52", "#8172B2"]
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    fig.suptitle(
-        f"Attention Weight Analysis — {task_name}",
-        fontsize=14, fontweight="bold"
-    )
-
-    # ── Left: bar chart ────────────────────────────────────
-    ax = axes[0]
-    bars = ax.bar(
-        levels, mean_w,
-        yerr=std_w,
-        color=colors[:len(levels)],
-        capsize=6,
-        edgecolor="black",
-        linewidth=0.8,
-        width=0.6
-    )
-    ax.axhline(uniform, color="gray", linestyle="--",
-               linewidth=1.5, label=f"Uniform ({uniform:.2f})")
-
-    for bar, val, std in zip(bars, mean_w, std_w):
-        ax.text(
-            bar.get_x() + bar.get_width() / 2,
-            bar.get_height() + std + 0.005,
-            f"{val:.3f}",
-            ha="center", va="bottom", fontsize=9, fontweight="bold"
-        )
-
-    ax.set_title("Mean ± Std", fontsize=12, fontweight="bold")
-    ax.set_xlabel("Hierarchical Level", fontsize=11)
-    ax.set_ylabel("Attention Weight",   fontsize=11)
-    ax.set_ylim(0, max(mean_w + std_w) * 1.3)
-    ax.legend(fontsize=9)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-
-    # ── Right: violin plot ─────────────────────────────────
-    ax = axes[1]
-    parts = ax.violinplot(
-        [weights[:, i] for i in range(len(levels))],
-        positions=range(len(levels)),
-        showmeans=True,
-        showmedians=True,
-        widths=0.6
-    )
-    for i, pc in enumerate(parts["bodies"]):
-        pc.set_facecolor(colors[i % len(colors)])
-        pc.set_alpha(0.7)
-
-    parts["cmeans"].set_color("black")
-    parts["cmedians"].set_color("red")
-
-    ax.axhline(uniform, color="gray", linestyle="--", linewidth=1.5)
-    ax.set_xticks(range(len(levels)))
-    ax.set_xticklabels(levels, fontsize=11)
-    ax.set_title("Distribution",        fontsize=12, fontweight="bold")
-    ax.set_xlabel("Hierarchical Level", fontsize=11)
-    ax.set_ylabel("Attention Weight",   fontsize=11)
-
-    mean_patch    = mpatches.Patch(color="black", label="Mean")
-    median_patch  = mpatches.Patch(color="red",   label="Median")
-    uniform_patch = mpatches.Patch(color="gray",  label=f"Uniform ({uniform:.2f})")
-    ax.legend(handles=[mean_patch, median_patch, uniform_patch], fontsize=9)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches="tight")
-    plt.close()
-    print(f"Saved: {save_path}")
-    
 # ============================================================
 # Summary table
 # ============================================================
 
 def print_summary(weights, levels):
-    print("\n" + "=" * 58)
+    print("=" * 58)
     print(f"{'Level':<12} {'Mean':>8} {'Std':>8} {'Min':>8} {'Max':>8}")
     print("-" * 58)
     for i, level in enumerate(levels):
-        print(f"{level:<12} {weights[:, i].mean():>8.4f} "
-              f"{weights[:, i].std():>8.4f} "
-              f"{weights[:, i].min():>8.4f} "
-              f"{weights[:, i].max():>8.4f}")
+        w = weights[:, i]
+        print(f"{level:<12} {w.mean():>8.4f} {w.std():>8.4f} {w.min():>8.4f} {w.max():>8.4f}")
     print("=" * 58)
+
+
+# ============================================================
+# Plot
+# ============================================================
+
+def draw_violin(ax, weights, levels, title, letter, show_ylabel):
+    L = len(levels)
+    pos = np.arange(L)
+
+    parts = ax.violinplot([weights[:, i] for i in range(L)], positions=pos,
+                          widths=0.75, showmeans=False, showmedians=False,
+                          showextrema=False)
+    for i, body in enumerate(parts["bodies"]):
+        body.set_facecolor(COLORS[i % len(COLORS)])
+        body.set_edgecolor("black")
+        body.set_linewidth(0.6)
+        body.set_alpha(0.75)
+
+    q1, q3 = np.percentile(weights, [25, 75], axis=0)
+    means  = weights.mean(axis=0)
+    ax.vlines(pos, q1, q3, color="black", linewidth=3, zorder=3)
+    ax.scatter(pos, means, s=22, color="white", edgecolor="black",
+               linewidth=0.9, zorder=4)
+
+    for x, m, top in zip(pos, means, weights.max(axis=0)):
+        ax.text(x, min(top + 0.03, 1.02), f"{m:.2f}",
+                ha="center", va="bottom", fontsize=7.5)
+
+    ax.axhline(1.0 / L, color="gray", linestyle="--", linewidth=1.0, zorder=1)
+
+    ax.set_xticks(pos)
+    ax.set_xticklabels([LEVEL_NAMES.get(l, l) for l in levels],
+                       fontsize=8.5, rotation=30, ha="right")
+    ax.set_ylim(0, 1.1)
+    ax.set_yticks([0, 0.25, 0.5, 0.75, 1.0])
+    ax.set_title(title, fontsize=10.5, fontweight="bold")
+    ax.text(-0.02, 1.06, f"({letter})", transform=ax.transAxes,
+            fontsize=11, fontweight="bold", ha="right", va="bottom")
+    if show_ylabel:
+        ax.set_ylabel("Attention weight", fontsize=10)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.grid(axis="y", linestyle=":", linewidth=0.5, alpha=0.6)
+
+
+def plot_all(weights_by_run, levels, out_path):
+    fig, axes = plt.subplots(2, 4, figsize=(15, 7.2), sharey=True)
+    axes = axes.flatten()
+
+    for k, (key, run) in enumerate(RUNS.items()):
+        ax = axes[k]
+        w = weights_by_run.get(key)
+        if w is None:
+            ax.text(0.5, 0.5, f"missing: {key}", ha="center", va="center",
+                    fontsize=8, color="red", transform=ax.transAxes)
+            ax.set_title(run["title"], fontsize=10.5, fontweight="bold")
+            ax.set_xticks([])
+            continue
+        draw_violin(ax, w, levels, run["title"], chr(ord("a") + k),
+                    show_ylabel=(k % 4 == 0))
+
+    # 8th slot -> shared legend
+    leg = axes[7]
+    leg.axis("off")
+    L = len(levels)
+    leg.legend(handles=[
+        Line2D([0], [0], marker="o", color="w", markerfacecolor="white",
+               markeredgecolor="black", markersize=7, label="Mean"),
+        Line2D([0], [0], color="black", linewidth=3, label="Interquartile range"),
+        Line2D([0], [0], color="gray", linestyle="--",
+               label=f"Uniform (1/{L} = {1.0 / L:.2f})"),
+    ], loc="center", fontsize=10, frameon=False)
+
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    for ext in ("pdf", "png"):
+        plt.savefig(f"{out_path}.{ext}", dpi=300, bbox_inches="tight")
+        print(f"Saved: {out_path}.{ext}")
+    plt.close()
+
 
 # ============================================================
 # Main
 # ============================================================
 
-if __name__ == "__main__":
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--data_config",  default="config/data_config.yaml")
+    p.add_argument("--model_config", default="config/model_config.yaml")
+    p.add_argument("--ckpt_dir",     default="./ckpts")
+    p.add_argument("--batch_size",   type=int, default=4)
+    p.add_argument("--device",       default="cuda")
+    p.add_argument("--active_levels", nargs="+",
+                   default=["surface", "atom", "residue", "sse", "protein"])
+    p.add_argument("--runs", nargs="+", default=list(RUNS.keys()),
+                   choices=list(RUNS.keys()),
+                   help="which runs to (re)compute; others are loaded from cache")
+    p.add_argument("--overwrite", action="store_true",
+                   help="recompute selected runs even if a cache exists")
+    p.add_argument("--plot_only", action="store_true",
+                   help="skip evaluation, plot from cached .npy files only")
+    p.add_argument("--output_dir", default="./plots")
+    args = p.parse_args()
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--data_config",  type=str, default="config/data_config.yaml")
-    parser.add_argument("--model_config", type=str, default="config/model_config.yaml")
-    parser.add_argument("--batch_size",   type=int, default=4)
-    parser.add_argument("--device",       type=str, default="cuda")
-    parser.add_argument("--task",         type=str, default="FoldClassification",
-                        help="FoldClassification | ECReaction | GeneOntology | BindingSite")
-    parser.add_argument("--go_branch",    type=str, default=None,
-                        help="MF | BP | CC (required for GeneOntology)")
-    parser.add_argument(
-        "--active_levels",
-        nargs="+",
-        default=["surface", "atom", "residue", "sse", "protein"]
-    )
-    parser.add_argument("--output_dir", type=str, default="./plots")
-
-    args   = parser.parse_args()
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     os.makedirs(args.output_dir, exist_ok=True)
+    levels    = args.active_levels
+    level_tag = "_".join(levels)
+    device    = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
-    # --------------------------------------------------
-    # Config
-    # --------------------------------------------------
-    TASK = args.task
+    scores_path = os.path.join(args.output_dir, f"attn_scores_{level_tag}.json")
+    scores = json.load(open(scores_path)) if os.path.exists(scores_path) else {}
 
-    data_config  = load_config(args.data_config)
-    model_config = load_config(args.model_config)
-    task_cfg     = data_config["tasks"][TASK]
-    task_type    = task_cfg["task_type"]
-    task_level   = task_cfg.get("task_level", "graph")
+    # ---------------- collect ----------------
+    if not args.plot_only:
+        data_config  = load_config(args.data_config)
+        model_config = load_config(args.model_config)
 
-    if TASK == "GeneOntology":
-        if args.go_branch is None:
-            raise ValueError("GeneOntology requires --go_branch (MF/BP/CC)")
-        num_classes = task_cfg["num_classes"][args.go_branch]
-    elif task_type == "node_classification":
-        num_classes = task_cfg["num_classes"]
-    else:
-        num_classes = task_cfg["num_classes"]
+        # group runs by (task, go_branch) so each checkpoint loads once
+        todo = [k for k in args.runs
+                if args.overwrite or not os.path.exists(cache_file(args.output_dir, RUNS[k], level_tag))]
+        groups = {}
+        for k in todo:
+            groups.setdefault((RUNS[k]["task"], RUNS[k]["go_branch"]), []).append(k)
 
-    # --------------------------------------------------
-    # Test splits per task
-    # --------------------------------------------------
-    if TASK == "FoldClassification":
-        TEST_SPLITS = ["family", "superfamily", "fold"]
-    else:
-        TEST_SPLITS = [None]   # single test set for all other tasks
+        for (task, go_branch), keys in groups.items():
+            task_cfg  = data_config["tasks"][task]
+            task_type = task_cfg["task_type"]
+            model, num_classes = load_model(task, go_branch, task_cfg, model_config,
+                                            levels, args.ckpt_dir, device)
 
-    # --------------------------------------------------
-    # Load checkpoint
-    # --------------------------------------------------
-    level_tag = "_".join(args.active_levels)
+            for key in keys:
+                run = RUNS[key]
+                print(f"\n=== {key}: {task} | GO={go_branch} | split={run['split']} ===")
+                loader = build_graph_dataloaders(
+                    args.data_config, task,
+                    batch_size=args.batch_size,
+                    test_only=True,
+                    test_set_split=run["split"],
+                    device=device,
+                    go_branch=go_branch,
+                )
+                score, weights = evaluate_and_collect(
+                    model, loader, task_type, num_classes, len(levels), device, desc=key)
 
-    if TASK == "GeneOntology":
-        ckpt_path = f"./ckpts/best_prime_ca_{TASK}_{args.go_branch}_{level_tag}.pt"
-    else:
-        ckpt_path = f"./ckpts/best_prime_ca_{TASK}_{level_tag}.pt"
+                metric_name = METRIC_NAME.get(task_type, "Score")
+                print(f"{metric_name}: {score:.4f}   (N = {len(weights)})")
+                print_summary(weights, levels)
 
-    print(f"Loading checkpoint: {ckpt_path}")
+                np.save(cache_file(args.output_dir, run, level_tag), weights)
+                scores[key] = {"metric": metric_name, "score": score, "n": int(len(weights))}
+                json.dump(scores, open(scores_path, "w"), indent=2)
 
-    # --------------------------------------------------
-    # Build model
-    # --------------------------------------------------
-    if TASK == "GeneOntology":
-        head_key = TASK
-    else:
-        head_key = TASK
+            del model
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
-    model = PRIME_CrossAttention(
-        num_classes=num_classes,
-        input_dims=model_config["hierarchical"]["input_dims"],
-        active_levels=args.active_levels,
-        hidden_dim=model_config["hierarchical"]["hidden_dim"],
-        encoder_layers=model_config["hierarchical"]["n_layers"],
-        head_hidden_dim=model_config["head"][head_key]["hidden_dim"],
-        head_layers=model_config["head"][head_key]["num_layers"],
-        dropout=model_config["head"][head_key]["dropout"],
-        task_level=task_level,
-    )
+    # ---------------- load all caches ----------------
+    weights_by_run = {}
+    for key, run in RUNS.items():
+        path = cache_file(args.output_dir, run, level_tag)
+        if os.path.exists(path):
+            weights_by_run[key] = np.load(path)
+        else:
+            print(f"[warn] no cache for {key}: {path}")
 
-    model.load_state_dict(torch.load(ckpt_path, map_location=device))
-    model.to(device).eval()
+    # ---------------- plot ----------------
+    plot_all(weights_by_run, levels,
+             os.path.join(args.output_dir, f"attn_all_tasks_{level_tag}"))
 
-    # --------------------------------------------------
-    # Evaluate + visualize per test split
-    # --------------------------------------------------
-    print("\n" + "=" * 50)
-    print(f"Task:      {TASK}")
-    print(f"GO Branch: {args.go_branch}")
-    print(f"Model:     PRIME_CrossAttention")
-    print("=" * 50)
-
-    weights_dict = {}
-
-    for split in TEST_SPLITS:
-
-        split_tag = split if split is not None else "test"
-        print(f"\n--- Test Split: {split_tag} ---")
-
-        test_loader = build_graph_dataloaders(
-            args.data_config,
-            TASK,
-            batch_size=args.batch_size,
-            test_only=True,
-            test_set_split=split,
-            device=device,
-            go_branch=args.go_branch,     # pass go_branch
-        )
-
-        # evaluate
-        metric = get_metric(task_type, num_classes, device)
-        metric.reset()
-
-        with torch.no_grad():
-            for batch in tqdm(test_loader, desc=f"Evaluating {split_tag}"):
-                for sample in batch:
-                    logits, _ = model(sample["graph"], return_attn=True)
-                    logits     = logits.squeeze(0)
-
-                    if task_type == "node_classification":
-                        labels = sample["label"].float().to(device)
-                        probs  = torch.sigmoid(logits).cpu()
-                        metric.update(probs, labels.long().cpu())
-
-                    elif task_type == "multilabel_classification":
-                        y = to_multihot(sample["label"], num_classes, device)
-                        metric.update(
-                            torch.sigmoid(logits).unsqueeze(0),
-                            y.int().unsqueeze(0)
-                        )
-
-                    else:
-                        label = torch.tensor(
-                            sample["label"], dtype=torch.long, device=device
-                        )
-                        metric.update(logits.unsqueeze(0), label.unsqueeze(0))
-
-        score = metric.compute().item()
-
-        metric_name = {
-            "multilabel_classification": "Fmax",
-            "node_classification":       "ROC-AUC",
-            "multiclass_classification": "Accuracy",
-        }.get(task_type, "Score")
-
-        print(f"{metric_name} ({split_tag}): {score:.4f}")
-
-        # collect attention weights
-        weights_dict[split_tag] = collect_attention_weights(model, test_loader)
-        print_summary(weights_dict[split_tag], args.active_levels)
-
-    # --------------------------------------------------
-    # Plot
-    # --------------------------------------------------
-    tag = f"{TASK}_{args.go_branch}_{level_tag}" if TASK == "GeneOntology" \
-          else f"{TASK}_{level_tag}"
-
-    if TASK == "FoldClassification":
-        # combined plot for 3 splits
-        plot_combined_attention(
-            weights_dict,
-            levels=args.active_levels,
-            save_path=os.path.join(args.output_dir, f"attn_combined_{tag}.png"),
-            task_name=TASK
-        )
-    else:
-        # single plot for other tasks
-        plot_single_task_attention(
-            weights_dict["test"],
-            levels=args.active_levels,
-            save_path=os.path.join(args.output_dir, f"attn_{tag}.png"),
-            task_name=TASK
-        )
-
+    if scores:
+        print("\nTest scores:")
+        for k, v in scores.items():
+            print(f"  {k:<18} {v['metric']:<9} {v['score']:.4f}  (N={v['n']})")
     print("\nDone.")
+
+
+if __name__ == "__main__":
+    main()

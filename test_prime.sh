@@ -10,9 +10,9 @@
 DATA_CONFIG="./config/data_config.yaml"
 MODEL_CONFIG="./config/model_config.yaml"
 
-TASK="GeneOntology"   # FoldClassification | ECReaction | GeneOntology | BindingSite
+TASK="FoldClassification"   # FoldClassification | ECReaction | GeneOntology | BindingSite
 BATCH_SIZE=32
-CUDA_DEVICE=2
+CUDA_DEVICE=3
 
 # -----------------------------
 # Hierarchy Ablation
@@ -26,9 +26,14 @@ READOUT_LEVEL="residue"
 CROSS_ATTENTION="false"   # true | false
 
 # -----------------------------
+# Direction — must match training direction
+# -----------------------------
+DIRECTION="bidirectional"   # bidirectional | bottom_up_only | top_down_only
+
+# -----------------------------
 # Seed — must match training seed
 # -----------------------------
-SEED=3
+SEED=2
 
 # -----------------------------
 # Optional for GO
@@ -38,7 +43,7 @@ GO_BRANCH="BP"   # MF | BP | CC
 # -----------------------------
 # Optional for FoldClassification
 # -----------------------------
-TEST_SET_SPLIT="family"   # family | superfamily | fold
+TEST_SET_SPLIT="fold"   # family | superfamily | fold
 
 echo "===================================="
 echo "Testing PRIME"
@@ -48,6 +53,7 @@ echo "CUDA device:     $CUDA_DEVICE"
 echo "Active Levels:   ${ACTIVE_LEVELS[@]}"
 echo "Readout Level:   $READOUT_LEVEL"
 echo "Cross Attention: $CROSS_ATTENTION"
+echo "Direction:       $DIRECTION"
 echo "Seed:            $SEED"
 echo "===================================="
 
@@ -61,6 +67,7 @@ CMD="CUDA_VISIBLE_DEVICES=$CUDA_DEVICE python test_prime.py \
     --batch_size $BATCH_SIZE \
     --active_levels ${ACTIVE_LEVELS[@]} \
     --readout_level $READOUT_LEVEL \
+    --direction $DIRECTION \
     --seed $SEED"
 
 if [ "$CROSS_ATTENTION" == "true" ]; then
